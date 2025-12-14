@@ -14,8 +14,12 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     
     // Hide form, show status area
     document.getElementById('uploadForm').style.display = 'none';
-    document.getElementById('statusArea').style.display = 'block';
-    document.getElementById('statusText').textContent = 'Uploading file and starting job...';
+    const statusArea = document.getElementById('statusArea');
+    const statusText = document.getElementById('statusText');
+    const startJobButton = document.getElementById('startJobButton');
+    
+    statusArea.style.display = 'block';
+    statusText.textContent = 'Uploading file... A new browser window should open shortly.';
 
     try {
         const res = await fetch('/upload', { method: 'POST', body: fd });
@@ -24,9 +28,31 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
             throw new Error(`Upload failed: ${errorText}`);
         }
         const data = await res.json();
-        pollStatus(data.jobId);
+        
+        // Prompt user to log in and show the start button
+        statusText.innerHTML = 'Browser window opened. Please log in to the target site.<br>Once you are logged in, click the button below to start processing.';
+        startJobButton.style.display = 'block';
+
+        startJobButton.onclick = async () => {
+            try {
+                startJobButton.disabled = true;
+                startJobButton.textContent = 'Sending start signal...';
+                const startRes = await fetch(`/signal-start/${data.jobId}`, { method: 'POST' });
+                if (!startRes.ok) {
+                    throw new Error('Failed to send start signal.');
+                }
+                startJobButton.style.display = 'none';
+                statusText.textContent = 'Start signal sent. Waiting for job to begin...';
+                pollStatus(data.jobId); // Start polling *after* signal is sent
+            } catch (err) {
+                statusText.textContent = `Error: ${err.message}`;
+                startJobButton.disabled = false;
+                startJobButton.textContent = "I've logged in, Start Processing";
+            }
+        };
+
     } catch (err) {
-        document.getElementById('statusText').textContent = `Error: ${err.message}`;
+        statusText.textContent = `Error: ${err.message}`;
     }
 });
 
@@ -43,13 +69,14 @@ function pollStatus(jobId) {
             }
             const data = await res.json();
 
-            statusText.textContent = `Status: ${data.status}`;
-
+            // Only update progress bar if the job is actually running
             if (data.status === 'running' && data.total > 0) {
                 const percentage = Math.round((data.progress / data.total) * 100);
                 progressBar.style.width = `${percentage}%`;
                 progressBar.textContent = `${percentage}%`;
                 statusText.textContent = `Status: ${data.status} (Processed ${data.progress} of ${data.total} rows)`;
+            } else {
+                statusText.textContent = `Status: ${data.status}`;
             }
 
             if (data.status === 'finished') {

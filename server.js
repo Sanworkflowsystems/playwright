@@ -91,6 +91,17 @@ app.get('/download/:jobId', (req, res) => {
   res.download(j.outputPath, `enriched_${originalFilename}`);
 });
 
+// Endpoint to create the start signal for the worker
+app.post('/signal-start/:jobId', (req, res) => {
+    const job = jobs[req.params.jobId];
+    if (!job) {
+        return res.status(404).send('Job not found.');
+    }
+    const signalPath = path.join(__dirname, 'outputs', `${req.params.jobId}.start`);
+    fs.writeFileSync(signalPath, ''); // Create the empty signal file
+    res.status(200).send('Start signal sent.');
+});
+
 // Simple singleton worker spawn
 let workerRunning = false;
 async function runQueue() {

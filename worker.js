@@ -41,11 +41,22 @@ const personalEmailDomains = [
 function randBetween(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
 function getDynamicWaitTime() {
-  if (Math.random() < 0.8) { // 80% chance
-    return randBetween(20000, 25000); // 20-25 seconds
-  } else { // 20% chance
-    return randBetween(25000, 30000); // 25-30 seconds
-  }
+  // Wait for 5-10 seconds
+  return randBetween(5000, 10000);
+}
+
+// New function to wait for a file signal from the UI
+async function waitForStartSignal(jobId) {
+    const signalPath = path.join(__dirname, 'outputs', `${jobId}.start`);
+    console.log('Waiting for start signal from UI...');
+    while (true) {
+        if (fs.existsSync(signalPath)) {
+            fs.unlinkSync(signalPath); // Clean up the signal file
+            console.log('Start signal received. Starting processing...');
+            break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Check every second
+    }
 }
 
 // Updated to return headers
@@ -93,8 +104,8 @@ function writeProgress(jobId, progress, total) {
   await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
 
   if (MANUAL_LOGIN) {
-    console.log('Manual login requested. Please login in the opened browser. Press Enter here once logged in.');
-    await new Promise(resolve => process.stdin.once('data', resolve));
+    // Replace stdin wait with file-based signal wait
+    await waitForStartSignal(jobId);
   }
 
   for (let i = 0; i < rows.length; i++) {
@@ -178,7 +189,7 @@ function writeProgress(jobId, progress, total) {
       if (row.hasOwnProperty('Other Personal Emails')) row['Other Personal Emails'] = personalEmails.join('; ') || row['Other Personal Emails'];
       if (row.hasOwnProperty('Work Email')) row['Work Email'] = workEmails.shift() || row['Work Email'];
       if (row.hasOwnProperty('Other Work Emails')) row['Other Work Emails'] = workEmails.join('; ') || row['Other Work Emails'];
-      if (row.hasOwnProperty('Work Email Status')) row['Work Email Status'] = (workEmails.length > 0 || (row['Work Email'] && row['Work Email'].length > 0)) ? 'Found' : 'Not Found';
+      if (row.hasOwnProperty('Work Email Status')) row['Work Email Status'] = (workEmails.length > 0 || (row['Work Email'] && row['Work Email'].length > 0)) ? 'Found' : ''; // Changed 'Not Found' to ''
       if (row.hasOwnProperty('Phone Number')) row['Phone Number'] = extractedPhones.shift() || row['Phone Number'];
       if (row.hasOwnProperty('Other Phone Numbers')) row['Other Phone Numbers'] = extractedPhones.join('; ') || row['Other Phone Numbers'];
       
