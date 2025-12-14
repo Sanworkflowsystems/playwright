@@ -20,6 +20,7 @@ if(!fs.existsSync(userDataDir)) fs.mkdirSync(userDataDir);
 const selectorsConfig = process.env.JOB_SELECTORS ? JSON.parse(process.env.JOB_SELECTORS) : {};
 const COOKIES_STRING = process.env.JOB_COOKIES || ''; // optional cookie string
 const MANUAL_LOGIN = process.env.JOB_MANUAL === '1';
+const IS_HEADLESS = process.env.HEADLESS_MODE === 'true';
 
 const {
   FULL_NAME_COLUMN_INDEX,
@@ -95,8 +96,8 @@ function writeProgress(jobId, progress, total) {
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
   };
   const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
-    args: ['--disable-blink-features=AutomationControlled'],
+    headless: IS_HEADLESS,
+    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
     ...browserContextOptions
   });
   const page = await context.newPage();
@@ -107,17 +108,15 @@ function writeProgress(jobId, progress, total) {
     const cookies = pairs.map(p => {
       const [name, ...rest] = p.split('=');
       return { name: name.trim(), value: rest.join('=').trim(), domain: '.contactout.com', path: '/' };
-    });
+    }
+    );
     await context.addCookies(cookies);
   }
-
   const initialUrl = SEARCH_PAGE_URL || 'https://contactout.com/dashboard/search';
   await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
-
   if (MANUAL_LOGIN) {
     await waitForStartSignal(jobId);
   }
-
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const fullName = row[headers[FULL_NAME_COLUMN_INDEX]] || '';

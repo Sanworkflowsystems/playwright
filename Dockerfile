@@ -13,6 +13,9 @@ RUN npm install
 # Copy the rest of your application's code into the container
 COPY . .
 
+# Set the HEADLESS_MODE environment variable for the server
+ENV HEADLESS_MODE=true
+
 # Ensure required directories exist (in case they weren't copied)
 RUN mkdir -p uploads outputs playwright_profile
 
