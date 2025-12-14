@@ -7,7 +7,10 @@ playwright_profile
 # Ignore git folder
 .git
 
-# Ignore files in upload/output directories but keep the directories themselves
+# Ignore test files
+test-*.tar.gz
+
+# Ignore files in upload/output directories but keep .gitkeep
 uploads/*
 !uploads/.gitkeep
 outputs/*
