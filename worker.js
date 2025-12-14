@@ -51,7 +51,11 @@ async function waitForStartSignal(jobId) {
     console.log('Waiting for start signal from UI...');
     while (true) {
         if (fs.existsSync(signalPath)) {
-            fs.unlinkSync(signalPath); // Clean up the signal file
+            try {
+                fs.unlinkSync(signalPath); // Clean up the signal file
+            } catch (e) {
+                console.error("Could not remove signal file, continuing...", e);
+            }
             console.log('Start signal received. Starting processing...');
             break;
         }
@@ -104,7 +108,6 @@ function writeProgress(jobId, progress, total) {
   await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
 
   if (MANUAL_LOGIN) {
-    // Replace stdin wait with file-based signal wait
     await waitForStartSignal(jobId);
   }
 
@@ -189,7 +192,7 @@ function writeProgress(jobId, progress, total) {
       if (row.hasOwnProperty('Other Personal Emails')) row['Other Personal Emails'] = personalEmails.join('; ') || row['Other Personal Emails'];
       if (row.hasOwnProperty('Work Email')) row['Work Email'] = workEmails.shift() || row['Work Email'];
       if (row.hasOwnProperty('Other Work Emails')) row['Other Work Emails'] = workEmails.join('; ') || row['Other Work Emails'];
-      if (row.hasOwnProperty('Work Email Status')) row['Work Email Status'] = (workEmails.length > 0 || (row['Work Email'] && row['Work Email'].length > 0)) ? 'Found' : ''; // Changed 'Not Found' to ''
+      if (row.hasOwnProperty('Work Email Status')) row['Work Email Status'] = (workEmails.length > 0 || (row['Work Email'] && row['Work Email'].length > 0)) ? 'Found' : '';
       if (row.hasOwnProperty('Phone Number')) row['Phone Number'] = extractedPhones.shift() || row['Phone Number'];
       if (row.hasOwnProperty('Other Phone Numbers')) row['Other Phone Numbers'] = extractedPhones.join('; ') || row['Other Phone Numbers'];
       
