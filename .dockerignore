@@ -6,3 +6,9 @@ playwright_profile
 
 # Ignore git folder
 .git
+
+# Ignore files in upload/output directories but keep the directories themselves
+uploads/*
+!uploads/.gitkeep
+outputs/*
+!outputs/.gitkeep
