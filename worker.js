@@ -144,8 +144,9 @@ function writeProgress(jobId, progress, total) {
         await page.waitForTimeout(randBetween(500, 1000));
       }
 
-      await page.type(NAME_INPUT_SELECTOR, fullName, { delay: randBetween(50, 150) });
-      await page.type(COMPANY_INPUT_SELECTOR, companyName, { delay: randBetween(50, 150) });
+      // Fill in search inputs
+      await page.fill(NAME_INPUT_SELECTOR, fullName);
+      await page.fill(COMPANY_INPUT_SELECTOR, companyName);
 
       await Promise.all([
         page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => console.log("No navigation after click, continuing...")),
