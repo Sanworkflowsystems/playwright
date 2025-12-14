@@ -4,13 +4,9 @@ node_modules
 # Ignore local Playwright browser data, as the Docker image has its own
 playwright_profile
 
-# Ignore local environment files
-.env
-
 # Ignore job-specific folders
 uploads
 outputs
 
 # Ignore git folder
 .git
-.gitignore
