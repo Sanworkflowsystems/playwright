@@ -1,0 +1,12 @@
+# Dependencies
+/node_modules
+
+# Playwright browser data
+/playwright_profile
+
+# Local environment variables
+.env
+
+# Job-specific folders
+/uploads
+/outputs
