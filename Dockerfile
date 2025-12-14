@@ -13,6 +13,9 @@ RUN npm install
 # Copy the rest of your application's code into the container
 COPY . .
 
+# Ensure required directories exist (in case they weren't copied)
+RUN mkdir -p uploads outputs playwright_profile
+
 # Expose the port the app runs on
 EXPOSE 3000
 
