@@ -83,6 +83,13 @@ function writeProgress(jobId, progress, total) {
 (async () => {
   const { rows, headers } = await readCSV(inputPath);
 
+  // 1. Initialize the csvWriter before the loop
+  const outputHeaders = headers.map(h => ({id: h, title: h}));
+  const csvWriter = createCsvWriter({
+    path: outputPath,
+    header: outputHeaders
+  });
+
   const browserContextOptions = {
     viewport: { width:1280, height:800 },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
@@ -200,18 +207,14 @@ function writeProgress(jobId, progress, total) {
       console.error('Error processing row', i, err);
       if(row.hasOwnProperty('Notes')) row['Notes'] = err.message.substring(0, 500);
     }
+    
+    // 2. Write incrementally after every row
+    await csvWriter.writeRecords(rows); 
 
     const wait = getDynamicWaitTime();
     console.log(`Waiting ${Math.round(wait/1000)}s before next`);
     await page.waitForTimeout(wait);
   }
-
-  const outputHeaders = headers.map(h => ({id: h, title: h}));
-  const csvWriter = createCsvWriter({
-    path: outputPath,
-    header: outputHeaders
-  });
-  await csvWriter.writeRecords(rows); 
 
   await context.close();
   console.log('Worker finished, output saved to', outputPath);

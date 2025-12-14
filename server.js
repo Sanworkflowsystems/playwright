@@ -83,11 +83,18 @@ app.get('/status/:jobId', (req, res) => {
 app.get('/download/:jobId', (req, res) => {
   const j = jobs[req.params.jobId];
   if (!j) return res.status(404).send('Not found');
-  if (j.status !== 'finished') return res.status(400).send('Job is not finished yet.');
-  if (!fs.existsSync(j.outputPath)) return res.status(404).send('Output file not found.');
+
+  // Allow download if job is finished or has errored out, as partial data may exist.
+  if (j.status === 'queued' || j.status === 'running') {
+    return res.status(400).send('Job is still in progress.');
+  }
+  
+  if (!fs.existsSync(j.outputPath)) {
+      return res.status(404).send('Output file not found. It may have been cleaned up or the job may have failed before any data was written.');
+  }
   
   // Provide the original uploaded filename for the download
-  const originalFilename = jobs[req.params.jobId].details.originalFilename || `${req.params.jobId}.csv`;
+  const originalFilename = (j.details && j.details.originalFilename) ? j.details.originalFilename : `${j.id}.csv`;
   res.download(j.outputPath, `enriched_${originalFilename}`);
 });
 
