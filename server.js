@@ -12,6 +12,19 @@ if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
 const OUTPUT_DIR = path.join(__dirname, 'outputs');
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR);
 
+// Hardcode the selectors as requested
+const HARDCODED_SELECTORS = {
+    "SEARCH_PAGE_URL": "https://contactout.com/dashboard/search",
+    "FULL_NAME_COLUMN_INDEX": 1,
+    "COMPANY_NAME_COLUMN_INDEX": 14,
+    "NAME_INPUT_SELECTOR": "input[name='nm']",
+    "COMPANY_INPUT_SELECTOR": "div.contactout-select__placeholder:has-text('e.g. Contactout') >> xpath=ancestor::div[contains(@class, 'contactout-select__control')] >> input.contactout-select__input",
+    "SUBMIT_BUTTON_SELECTOR": "button[type='submit']",
+    "RESULT_CONTAINER_SELECTOR": "div.min-xl\\:pl-\\[1\\.4375rem\\]",
+    "EMAIL_ITEM_SELECTOR": "div[data-for*='@']",
+    "PHONE_REVEAL_BUTTON_SELECTOR": "button.reveal-btn",
+    "PHONE_ITEM_SELECTOR": "div.css-2c062s div.css-bsfhvb"
+};
 
 const app = express();
 app.use(express.json());
@@ -28,18 +41,22 @@ app.post('/upload', upload.single('file'), (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).send('No file uploaded.');
 
-  // Accept session options from user: either cookies string or "manual_login": true
-  const { cookies, manual_login, selectors } = req.body;
+  // Accept session options from user, selectors are now hardcoded
+  const { cookies, manual_login } = req.body;
   const jobId = uuidv4();
   const outputPath = path.join(__dirname, 'outputs', `${jobId}.csv`);
+  const statusPath = path.join(__dirname, 'outputs', `${jobId}.json`);
+
   jobs[jobId] = {
     id: jobId,
     status: 'queued',
     inputPath: file.path,
     outputPath,
+    statusPath,
     createdAt: new Date().toISOString(),
     progress: 0,
-    details: { cookies, manual_login: manual_login === 'true', selectors: selectors ? JSON.parse(selectors) : {} }
+    total: 0,
+    details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS }
   };
   queue.push(jobId);
   res.json({ jobId });
@@ -50,14 +67,28 @@ app.post('/upload', upload.single('file'), (req, res) => {
 app.get('/status/:jobId', (req, res) => {
   const j = jobs[req.params.jobId];
   if (!j) return res.status(404).send('Not found');
-  res.json(j);
+
+  let progressData = {};
+  if (fs.existsSync(j.statusPath)) {
+      try {
+        progressData = JSON.parse(fs.readFileSync(j.statusPath, 'utf8'));
+      } catch (e) {
+        console.error("Error reading status file: ", e);
+      }
+  }
+  
+  res.json({ ...j, ...progressData });
 });
 
 app.get('/download/:jobId', (req, res) => {
   const j = jobs[req.params.jobId];
   if (!j) return res.status(404).send('Not found');
-  if (!fs.existsSync(j.outputPath)) return res.status(404).send('Output not ready');
-  res.download(j.outputPath);
+  if (j.status !== 'finished') return res.status(400).send('Job is not finished yet.');
+  if (!fs.existsSync(j.outputPath)) return res.status(404).send('Output file not found.');
+  
+  // Provide the original uploaded filename for the download
+  const originalFilename = jobs[req.params.jobId].details.originalFilename || `${req.params.jobId}.csv`;
+  res.download(j.outputPath, `enriched_${originalFilename}`);
 });
 
 // Simple singleton worker spawn
@@ -74,10 +105,16 @@ async function runQueue() {
       // call worker.js with job info
       await runWorker(job);
       job.status = 'finished';
+      // Write final status
+      const statusPayload = { progress: job.total, total: job.total, status: 'finished' };
+      fs.writeFileSync(job.statusPath, JSON.stringify(statusPayload));
     } catch (e) {
       console.error('Worker failed', e);
       job.status = 'error';
       job.error = e.message;
+       // Write error status
+      const statusPayload = { status: 'error', error: e.message };
+      fs.writeFileSync(job.statusPath, JSON.stringify(statusPayload));
     }
   }
   workerRunning = false;
@@ -99,3 +136,4 @@ function runWorker(job) {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server listening ${PORT}`));
+

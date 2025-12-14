@@ -1,19 +1,33 @@
 <!doctype html>
-<html>
-<head><meta charset="utf-8"><title>Enrich Upload</title></head>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Enrich Upload</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; padding: 2em; }
+        #statusArea { margin-top: 2em; padding: 1em; border: 1px solid #ccc; border-radius: 5px; }
+        #progressBarContainer { width: 100%; background-color: #f3f3f3; border-radius: 5px; margin-top: 0.5em; }
+        #progressBar { width: 0%; height: 20px; background-color: #4caf50; border-radius: 5px; text-align: center; line-height: 20px; color: white; }
+        #downloadLink { display: none; margin-top: 1em; font-weight: bold; }
+    </style>
+</head>
 <body>
   <h2>Upload CSV to Enrich</h2>
   <form id="uploadForm">
-    <input type="file" id="file" accept=".csv" required /><br/>
-    <label>Manual login?<input type="checkbox" id="manualLogin" checked /></label><br/>
+    <input type="file" id="file" name="file" accept=".csv" required /><br/><br/>
+    <label>Manual login?<input type="checkbox" id="manualLogin" checked /></label><br/><br/>
     <label>Cookies (optional):</label><br/>
-    <textarea id="cookies" placeholder="cookie1=val; cookie2=val" rows=3 cols=60></textarea><br/>
-    <label>Selectors JSON (optional):</label><br/>
-    <textarea id="selectors" placeholder='{"SEARCH_PAGE_URL":"https://...","PROFILE_URL_COLUMN_INDEX":0, ...}' rows=6 cols=60></textarea><br/>
+    <textarea id="cookies" placeholder="cookie1=val; cookie2=val" rows="3" cols="60"></textarea><br/><br/>
     <button type="submit">Upload & Start</button>
   </form>
 
-  <div id="result"></div>
+  <div id="statusArea" style="display: none;">
+      <p id="statusText"></p>
+      <div id="progressBarContainer">
+          <div id="progressBar"></div>
+      </div>
+      <a id="downloadLink" href="#">Download Enriched CSV</a>
+  </div>
 
   <script src="app.js"></script>
 </body>
