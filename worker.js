@@ -84,13 +84,6 @@ function writeProgress(jobId, progress, total) {
 (async () => {
   const { rows, headers } = await readCSV(inputPath);
 
-  // 1. Initialize the csvWriter before the loop
-  const outputHeaders = headers.map(h => ({id: h, title: h}));
-  const csvWriter = createCsvWriter({
-    path: outputPath,
-    header: outputHeaders
-  });
-
   const browserContextOptions = {
     viewport: { width:1280, height:800 },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
@@ -112,11 +105,14 @@ function writeProgress(jobId, progress, total) {
     );
     await context.addCookies(cookies);
   }
+  
   const initialUrl = SEARCH_PAGE_URL || 'https://contactout.com/dashboard/search';
   await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
+  
   if (MANUAL_LOGIN) {
     await waitForStartSignal(jobId);
   }
+
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const fullName = row[headers[FULL_NAME_COLUMN_INDEX]] || '';
@@ -126,23 +122,9 @@ function writeProgress(jobId, progress, total) {
     writeProgress(jobId, i + 1, rows.length);
 
     try {
-      if (i > 0) {
-        const removeTagSelector = "div.contactout-select__multi-value__remove";
-        const removeTagButton = page.locator(removeTagSelector);
-        if (await removeTagButton.isVisible({ timeout: 1000 }).catch(() => false)) {
-            await removeTagButton.click();
-        }
-        const nameInput = page.locator(NAME_INPUT_SELECTOR);
-        const nameValue = await nameInput.inputValue();
-        if (nameValue) {
-          await nameInput.click();
-          for (let k = 0; k < nameValue.length; k++) {
-            await page.keyboard.press('Backspace');
-            await page.waitForTimeout(randBetween(20, 50));
-          }
-        }
-        await page.waitForTimeout(randBetween(500, 1000));
-      }
+      // Refresh the page for each search to ensure a clean state
+      await page.goto(SEARCH_PAGE_URL, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(randBetween(500, 1000)); // Small wait for page to settle
 
       // Fill in search inputs
       await page.fill(NAME_INPUT_SELECTOR, fullName);
@@ -211,13 +193,18 @@ function writeProgress(jobId, progress, total) {
       if(row.hasOwnProperty('Notes')) row['Notes'] = err.message.substring(0, 500);
     }
     
-    // 2. Write incrementally after every row
-    await csvWriter.writeRecords(rows); 
-
     const wait = getDynamicWaitTime();
     console.log(`Waiting ${Math.round(wait/1000)}s before next`);
     await page.waitForTimeout(wait);
   }
+
+  // Write the final results once at the end
+  const outputHeaders = headers.map(h => ({id: h, title: h}));
+  const csvWriter = createCsvWriter({
+    path: outputPath,
+    header: outputHeaders
+  });
+  await csvWriter.writeRecords(rows); 
 
   await context.close();
   console.log('Worker finished, output saved to', outputPath);
