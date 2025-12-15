@@ -42,29 +42,26 @@ const personalEmailDomains = [
 function randBetween(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
 function getDynamicWaitTime() {
-  // Wait for 5-10 seconds
-  return randBetween(5000, 10000);
+  return randBetween(5000, 10000); // 5-10 seconds
 }
 
-// New function to wait for a file signal from the UI
 async function waitForStartSignal(jobId) {
     const signalPath = path.join(__dirname, 'outputs', `${jobId}.start`);
     console.log('Waiting for start signal from UI...');
     while (true) {
         if (fs.existsSync(signalPath)) {
             try {
-                fs.unlinkSync(signalPath); // Clean up the signal file
+                fs.unlinkSync(signalPath);
             } catch (e) {
                 console.error("Could not remove signal file, continuing...", e);
             }
             console.log('Start signal received. Starting processing...');
             break;
         }
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Check every second
+        await new Promise(resolve => setTimeout(resolve, 1000));
     }
 }
 
-// Updated to return headers
 async function readCSV(file) {
   return new Promise((res, rej) => {
     const rows = [];
@@ -101,8 +98,7 @@ function writeProgress(jobId, progress, total) {
     const cookies = pairs.map(p => {
       const [name, ...rest] = p.split('=');
       return { name: name.trim(), value: rest.join('=').trim(), domain: '.contactout.com', path: '/' };
-    }
-    );
+    });
     await context.addCookies(cookies);
   }
   
@@ -111,6 +107,18 @@ function writeProgress(jobId, progress, total) {
   
   if (MANUAL_LOGIN) {
     await waitForStartSignal(jobId);
+  }
+
+  try {
+    console.log('Verifying login status and page readiness...');
+    await page.waitForSelector(NAME_INPUT_SELECTOR, { state: 'visible', timeout: 15000 });
+    console.log('Login verified. Starting job...');
+  } catch (e) {
+    console.error('Pre-flight check failed. The search input form was not visible.');
+    const errorHtmlPath = path.join(__dirname, 'outputs', `${jobId}-pre-flight-error.html`);
+    fs.writeFileSync(errorHtmlPath, await page.content());
+    console.error(`Saved a snapshot of the page to ${errorHtmlPath}`);
+    throw new Error('Login failed or search form not found on page. Please check your cookies or manual login.');
   }
 
   for (let i = 0; i < rows.length; i++) {
@@ -122,15 +130,12 @@ function writeProgress(jobId, progress, total) {
     writeProgress(jobId, i + 1, rows.length);
 
     try {
-      // Refresh the page for each search to ensure a clean state
       await page.goto(SEARCH_PAGE_URL, { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(randBetween(500, 1000)); // Small wait for page to settle
+      await page.waitForTimeout(randBetween(500, 1000));
 
-      // Fill in search inputs
       await page.fill(NAME_INPUT_SELECTOR, fullName);
       await page.fill(COMPANY_INPUT_SELECTOR, companyName);
 
-      // Explicitly wait for the submit button to become enabled
       await page.waitForSelector(SUBMIT_BUTTON_SELECTOR, {state: 'enabled', timeout: 30000});
 
       await Promise.all([
@@ -179,7 +184,6 @@ function writeProgress(jobId, progress, total) {
         }
       }
       
-      // Directly modify the row object
       if (row.hasOwnProperty('Personal Email')) row['Personal Email'] = personalEmails.shift() || row['Personal Email'];
       if (row.hasOwnProperty('Other Personal Emails')) row['Other Personal Emails'] = personalEmails.join('; ') || row['Other Personal Emails'];
       if (row.hasOwnProperty('Work Email')) row['Work Email'] = workEmails.shift() || row['Work Email'];
@@ -190,6 +194,14 @@ function writeProgress(jobId, progress, total) {
       
     } catch (err) {
       console.error('Error processing row', i, err);
+      console.error(`Error occurred on URL: ${page.url()}`);
+      const errorHtmlPath = path.join(__dirname, 'outputs', `${jobId}-error-row-${i}.html`);
+      try {
+        fs.writeFileSync(errorHtmlPath, await page.content());
+        console.error(`Saved a snapshot of the page to ${errorHtmlPath}`);
+      } catch (writeErr) {
+        console.error(`Failed to write error snapshot: ${writeErr.message}`);
+      }
       if(row.hasOwnProperty('Notes')) row['Notes'] = err.message.substring(0, 500);
     }
     
@@ -198,7 +210,6 @@ function writeProgress(jobId, progress, total) {
     await page.waitForTimeout(wait);
   }
 
-  // Write the final results once at the end
   const outputHeaders = headers.map(h => ({id: h, title: h}));
   const csvWriter = createCsvWriter({
     path: outputPath,
