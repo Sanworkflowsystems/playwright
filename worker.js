@@ -20,7 +20,7 @@ if(!fs.existsSync(userDataDir)) fs.mkdirSync(userDataDir);
 const selectorsConfig = process.env.JOB_SELECTORS ? JSON.parse(process.env.JOB_SELECTORS) : {};
 const COOKIES_STRING = process.env.JOB_COOKIES || ''; // optional cookie string
 const MANUAL_LOGIN = process.env.JOB_MANUAL === '1';
-const IS_HEADLESS = process.env.HEADLESS_MODE === 'true';
+const IS_HEADLESS = false; // FOR LOCAL DEBUGGING ONLY - Set to 'true' for headless server deployment.
 
 const {
   FULL_NAME_COLUMN_INDEX,
