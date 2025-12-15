@@ -20,7 +20,7 @@ if(!fs.existsSync(userDataDir)) fs.mkdirSync(userDataDir);
 const selectorsConfig = process.env.JOB_SELECTORS ? JSON.parse(process.env.JOB_SELECTORS) : {};
 const COOKIES_STRING = process.env.JOB_COOKIES || ''; // optional cookie string
 const MANUAL_LOGIN = process.env.JOB_MANUAL === '1';
-const IS_HEADLESS = process.env.HEADLESS_MODE === 'true';
+const IS_HEADLESS = false; // FOR LOCAL DEBUGGING
 
 const {
   FULL_NAME_COLUMN_INDEX,
@@ -42,8 +42,7 @@ const personalEmailDomains = [
 function randBetween(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
 function getDynamicWaitTime() {
-  // Wait for 5-10 seconds
-  return randBetween(5000, 10000);
+  return randBetween(8000, 12000); // 8-12 seconds
 }
 
 // New function to wait for a file signal from the UI
@@ -84,13 +83,6 @@ function writeProgress(jobId, progress, total) {
 (async () => {
   const { rows, headers } = await readCSV(inputPath);
 
-  // 1. Initialize the csvWriter before the loop
-  const outputHeaders = headers.map(h => ({id: h, title: h}));
-  const csvWriter = createCsvWriter({
-    path: outputPath,
-    header: outputHeaders
-  });
-
   const browserContextOptions = {
     viewport: { width:1280, height:800 },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
@@ -117,6 +109,19 @@ function writeProgress(jobId, progress, total) {
   if (MANUAL_LOGIN) {
     await waitForStartSignal(jobId);
   }
+
+  try {
+    console.log('Verifying login status and page readiness...');
+    await page.waitForSelector(NAME_INPUT_SELECTOR, { state: 'visible', timeout: 15000 });
+    console.log('Login verified. Starting job...');
+  } catch (e) {
+    console.error('Pre-flight check failed. The search input form was not visible.');
+    const errorHtmlPath = path.join(__dirname, 'outputs', `${jobId}-pre-flight-error.html`);
+    fs.writeFileSync(errorHtmlPath, await page.content());
+    console.error(`Saved a snapshot of the page to ${errorHtmlPath}`);
+    throw new Error('Login failed or search form not found on page. Please check your cookies or manual login.');
+  }
+
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const fullName = row[headers[FULL_NAME_COLUMN_INDEX]] || '';
@@ -153,7 +158,23 @@ function writeProgress(jobId, progress, total) {
         page.click(SUBMIT_BUTTON_SELECTOR)
       ]);
 
-      await page.waitForTimeout(randBetween(2500, 4000));
+      await page.waitForTimeout(randBetween(3000, 5000)); // Wait for results to load
+
+      console.log('Searching for "View email" and "Find phone" buttons...');
+      const revealButtons = await page.locator('button:has-text("View email"), button:has-text("Find phone")').all();
+      console.log(`Found ${revealButtons.length} reveal buttons.`);
+
+      for (const button of revealButtons) {
+        try {
+          await button.click({timeout: 5000});
+          console.log('Clicked a reveal button.');
+          await page.waitForTimeout(randBetween(500, 1000)); // Stagger clicks to allow UI to update
+        } catch (clickErr) {
+            console.log("Could not click a reveal button, it might have disappeared or was not clickable.");
+        }
+      }
+      
+      await page.waitForTimeout(2000); // Final wait for all content to be revealed
 
       let extractedEmails = [];
       let extractedPhones = [];
@@ -208,8 +229,7 @@ function writeProgress(jobId, progress, total) {
       if(row.hasOwnProperty('Notes')) row['Notes'] = err.message.substring(0, 500);
     }
     
-    // 2. Write incrementally after every row
-    await csvWriter.writeRecords(rows); 
+
 
     const wait = getDynamicWaitTime();
     console.log(`Waiting ${Math.round(wait/1000)}s before next`);
@@ -218,5 +238,14 @@ function writeProgress(jobId, progress, total) {
 
   await context.close();
   console.log('Worker finished, output saved to', outputPath);
+
+  // Write the final results once at the end
+  const outputHeaders = headers.map(h => ({id: h, title: h}));
+  const csvWriter = createCsvWriter({
+    path: outputPath,
+    header: outputHeaders
+  });
+  await csvWriter.writeRecords(rows); 
+
   process.exit(0);
 })();
