@@ -16,7 +16,7 @@ if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR);
 const HARDCODED_SELECTORS = {
     "SEARCH_PAGE_URL": "https://contactout.com/dashboard/search",
     "FULL_NAME_COLUMN_INDEX": 1,
-    "COMPANY_NAME_COLUMN_INDEX": 4,
+    "COMPANY_NAME_COLUMN_INDEX": 14,
     "NAME_INPUT_SELECTOR": "input[name='nm']",
     "COMPANY_INPUT_SELECTOR": "div.contactout-select__placeholder:has-text('e.g. Contactout') >> xpath=ancestor::div[contains(@class, 'contactout-select__control')] >> input.contactout-select__input",
     "SUBMIT_BUTTON_SELECTOR": "button[type='submit']",

@@ -20,7 +20,6 @@ if(!fs.existsSync(userDataDir)) fs.mkdirSync(userDataDir);
 const selectorsConfig = process.env.JOB_SELECTORS ? JSON.parse(process.env.JOB_SELECTORS) : {};
 const COOKIES_STRING = process.env.JOB_COOKIES || ''; // optional cookie string
 const MANUAL_LOGIN = process.env.JOB_MANUAL === '1';
-const IS_HEADLESS = false; // FOR LOCAL DEBUGGING ONLY - Set to 'true' for headless server deployment.
 
 const {
   FULL_NAME_COLUMN_INDEX,
@@ -42,26 +41,29 @@ const personalEmailDomains = [
 function randBetween(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
 function getDynamicWaitTime() {
-  return randBetween(5000, 10000); // 5-10 seconds
+  // Wait for 5-10 seconds
+  return randBetween(5000, 10000);
 }
 
+// New function to wait for a file signal from the UI
 async function waitForStartSignal(jobId) {
     const signalPath = path.join(__dirname, 'outputs', `${jobId}.start`);
     console.log('Waiting for start signal from UI...');
     while (true) {
         if (fs.existsSync(signalPath)) {
             try {
-                fs.unlinkSync(signalPath);
+                fs.unlinkSync(signalPath); // Clean up the signal file
             } catch (e) {
                 console.error("Could not remove signal file, continuing...", e);
             }
             console.log('Start signal received. Starting processing...');
             break;
         }
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Check every second
     }
 }
 
+// Updated to return headers
 async function readCSV(file) {
   return new Promise((res, rej) => {
     const rows = [];
@@ -81,13 +83,20 @@ function writeProgress(jobId, progress, total) {
 (async () => {
   const { rows, headers } = await readCSV(inputPath);
 
+  // 1. Initialize the csvWriter before the loop
+  const outputHeaders = headers.map(h => ({id: h, title: h}));
+  const csvWriter = createCsvWriter({
+    path: outputPath,
+    header: outputHeaders
+  });
+
   const browserContextOptions = {
     viewport: { width:1280, height:800 },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
   };
   const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: IS_HEADLESS,
-    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+    headless: false,
+    args: ['--disable-blink-features=AutomationControlled'],
     ...browserContextOptions
   });
   const page = await context.newPage();
@@ -101,24 +110,12 @@ function writeProgress(jobId, progress, total) {
     });
     await context.addCookies(cookies);
   }
-  
+
   const initialUrl = SEARCH_PAGE_URL || 'https://contactout.com/dashboard/search';
   await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
-  
+
   if (MANUAL_LOGIN) {
     await waitForStartSignal(jobId);
-  }
-
-  try {
-    console.log('Verifying login status and page readiness...');
-    await page.waitForSelector(NAME_INPUT_SELECTOR, { state: 'visible', timeout: 15000 });
-    console.log('Login verified. Starting job...');
-  } catch (e) {
-    console.error('Pre-flight check failed. The search input form was not visible.');
-    const errorHtmlPath = path.join(__dirname, 'outputs', `${jobId}-pre-flight-error.html`);
-    fs.writeFileSync(errorHtmlPath, await page.content());
-    console.error(`Saved a snapshot of the page to ${errorHtmlPath}`);
-    throw new Error('Login failed or search form not found on page. Please check your cookies or manual login.');
   }
 
   for (let i = 0; i < rows.length; i++) {
@@ -130,13 +127,26 @@ function writeProgress(jobId, progress, total) {
     writeProgress(jobId, i + 1, rows.length);
 
     try {
-      await page.goto(SEARCH_PAGE_URL, { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(randBetween(500, 1000));
+      if (i > 0) {
+        const removeTagSelector = "div.contactout-select__multi-value__remove";
+        const removeTagButton = page.locator(removeTagSelector);
+        if (await removeTagButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+            await removeTagButton.click();
+        }
+        const nameInput = page.locator(NAME_INPUT_SELECTOR);
+        const nameValue = await nameInput.inputValue();
+        if (nameValue) {
+          await nameInput.click();
+          for (let k = 0; k < nameValue.length; k++) {
+            await page.keyboard.press('Backspace');
+            await page.waitForTimeout(randBetween(20, 50));
+          }
+        }
+        await page.waitForTimeout(randBetween(500, 1000));
+      }
 
-      await page.fill(NAME_INPUT_SELECTOR, fullName);
-      await page.fill(COMPANY_INPUT_SELECTOR, companyName);
-
-      await page.waitForSelector(SUBMIT_BUTTON_SELECTOR, {state: 'enabled', timeout: 30000});
+      await page.type(NAME_INPUT_SELECTOR, fullName, { delay: randBetween(50, 150) });
+      await page.type(COMPANY_INPUT_SELECTOR, companyName, { delay: randBetween(50, 150) });
 
       await Promise.all([
         page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => console.log("No navigation after click, continuing...")),
@@ -184,6 +194,7 @@ function writeProgress(jobId, progress, total) {
         }
       }
       
+      // Directly modify the row object
       if (row.hasOwnProperty('Personal Email')) row['Personal Email'] = personalEmails.shift() || row['Personal Email'];
       if (row.hasOwnProperty('Other Personal Emails')) row['Other Personal Emails'] = personalEmails.join('; ') || row['Other Personal Emails'];
       if (row.hasOwnProperty('Work Email')) row['Work Email'] = workEmails.shift() || row['Work Email'];
@@ -194,28 +205,16 @@ function writeProgress(jobId, progress, total) {
       
     } catch (err) {
       console.error('Error processing row', i, err);
-      console.error(`Error occurred on URL: ${page.url()}`);
-      const errorHtmlPath = path.join(__dirname, 'outputs', `${jobId}-error-row-${i}.html`);
-      try {
-        fs.writeFileSync(errorHtmlPath, await page.content());
-        console.error(`Saved a snapshot of the page to ${errorHtmlPath}`);
-      } catch (writeErr) {
-        console.error(`Failed to write error snapshot: ${writeErr.message}`);
-      }
       if(row.hasOwnProperty('Notes')) row['Notes'] = err.message.substring(0, 500);
     }
     
+    // 2. Write incrementally after every row
+    await csvWriter.writeRecords(rows); 
+
     const wait = getDynamicWaitTime();
     console.log(`Waiting ${Math.round(wait/1000)}s before next`);
     await page.waitForTimeout(wait);
   }
-
-  const outputHeaders = headers.map(h => ({id: h, title: h}));
-  const csvWriter = createCsvWriter({
-    path: outputPath,
-    header: outputHeaders
-  });
-  await csvWriter.writeRecords(rows); 
 
   await context.close();
   console.log('Worker finished, output saved to', outputPath);
