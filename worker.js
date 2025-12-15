@@ -148,6 +148,9 @@ function writeProgress(jobId, progress, total) {
       await page.fill(NAME_INPUT_SELECTOR, fullName);
       await page.fill(COMPANY_INPUT_SELECTOR, companyName);
 
+      // Explicitly wait for the submit button to become enabled
+      await page.waitForSelector(SUBMIT_BUTTON_SELECTOR, {state: 'enabled', timeout: 30000});
+
       await Promise.all([
         page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => console.log("No navigation after click, continuing...")),
         page.click(SUBMIT_BUTTON_SELECTOR)
