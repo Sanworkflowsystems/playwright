@@ -41,8 +41,8 @@ const personalEmailDomains = [
 function randBetween(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
 function getDynamicWaitTime() {
-  // Wait for 5-10 seconds
-  return randBetween(5000, 10000);
+  // Wait for 8-12 seconds
+  return randBetween(8000, 12000);
 }
 
 // New function to wait for a file signal from the UI
@@ -83,12 +83,7 @@ function writeProgress(jobId, progress, total) {
 (async () => {
   const { rows, headers } = await readCSV(inputPath);
 
-  // 1. Initialize the csvWriter before the loop
-  const outputHeaders = headers.map(h => ({id: h, title: h}));
-  const csvWriter = createCsvWriter({
-    path: outputPath,
-    header: outputHeaders
-  });
+
 
   const browserContextOptions = {
     viewport: { width:1280, height:800 },
@@ -208,8 +203,7 @@ function writeProgress(jobId, progress, total) {
       if(row.hasOwnProperty('Notes')) row['Notes'] = err.message.substring(0, 500);
     }
     
-    // 2. Write incrementally after every row
-    await csvWriter.writeRecords(rows); 
+
 
     const wait = getDynamicWaitTime();
     console.log(`Waiting ${Math.round(wait/1000)}s before next`);
@@ -218,5 +212,14 @@ function writeProgress(jobId, progress, total) {
 
   await context.close();
   console.log('Worker finished, output saved to', outputPath);
+
+  // Write the final results once at the end
+  const outputHeaders = headers.map(h => ({id: h, title: h}));
+  const csvWriter = createCsvWriter({
+    path: outputPath,
+    header: outputHeaders
+  });
+  await csvWriter.writeRecords(rows); 
+
   process.exit(0);
 })();
