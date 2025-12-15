@@ -20,6 +20,7 @@ if(!fs.existsSync(userDataDir)) fs.mkdirSync(userDataDir);
 const selectorsConfig = process.env.JOB_SELECTORS ? JSON.parse(process.env.JOB_SELECTORS) : {};
 const COOKIES_STRING = process.env.JOB_COOKIES || ''; // optional cookie string
 const MANUAL_LOGIN = process.env.JOB_MANUAL === '1';
+const IS_HEADLESS = process.env.HEADLESS_MODE === 'true';
 
 const {
   FULL_NAME_COLUMN_INDEX,
@@ -41,8 +42,8 @@ const personalEmailDomains = [
 function randBetween(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
 function getDynamicWaitTime() {
-  // Wait for 8-12 seconds
-  return randBetween(8000, 12000);
+  // Wait for 5-10 seconds
+  return randBetween(5000, 10000);
 }
 
 // New function to wait for a file signal from the UI
@@ -83,15 +84,20 @@ function writeProgress(jobId, progress, total) {
 (async () => {
   const { rows, headers } = await readCSV(inputPath);
 
-
+  // 1. Initialize the csvWriter before the loop
+  const outputHeaders = headers.map(h => ({id: h, title: h}));
+  const csvWriter = createCsvWriter({
+    path: outputPath,
+    header: outputHeaders
+  });
 
   const browserContextOptions = {
     viewport: { width:1280, height:800 },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
   };
   const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
-    args: ['--disable-blink-features=AutomationControlled'],
+    headless: IS_HEADLESS,
+    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
     ...browserContextOptions
   });
   const page = await context.newPage();
@@ -102,17 +108,15 @@ function writeProgress(jobId, progress, total) {
     const cookies = pairs.map(p => {
       const [name, ...rest] = p.split('=');
       return { name: name.trim(), value: rest.join('=').trim(), domain: '.contactout.com', path: '/' };
-    });
+    }
+    );
     await context.addCookies(cookies);
   }
-
   const initialUrl = SEARCH_PAGE_URL || 'https://contactout.com/dashboard/search';
   await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
-
   if (MANUAL_LOGIN) {
     await waitForStartSignal(jobId);
   }
-
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const fullName = row[headers[FULL_NAME_COLUMN_INDEX]] || '';
@@ -140,8 +144,9 @@ function writeProgress(jobId, progress, total) {
         await page.waitForTimeout(randBetween(500, 1000));
       }
 
-      await page.type(NAME_INPUT_SELECTOR, fullName, { delay: randBetween(50, 150) });
-      await page.type(COMPANY_INPUT_SELECTOR, companyName, { delay: randBetween(50, 150) });
+      // Fill in search inputs
+      await page.fill(NAME_INPUT_SELECTOR, fullName);
+      await page.fill(COMPANY_INPUT_SELECTOR, companyName);
 
       await Promise.all([
         page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => console.log("No navigation after click, continuing...")),
@@ -203,7 +208,8 @@ function writeProgress(jobId, progress, total) {
       if(row.hasOwnProperty('Notes')) row['Notes'] = err.message.substring(0, 500);
     }
     
-
+    // 2. Write incrementally after every row
+    await csvWriter.writeRecords(rows); 
 
     const wait = getDynamicWaitTime();
     console.log(`Waiting ${Math.round(wait/1000)}s before next`);
@@ -212,14 +218,5 @@ function writeProgress(jobId, progress, total) {
 
   await context.close();
   console.log('Worker finished, output saved to', outputPath);
-
-  // Write the final results once at the end
-  const outputHeaders = headers.map(h => ({id: h, title: h}));
-  const csvWriter = createCsvWriter({
-    path: outputPath,
-    header: outputHeaders
-  });
-  await csvWriter.writeRecords(rows); 
-
   process.exit(0);
 })();
