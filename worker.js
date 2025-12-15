@@ -160,45 +160,69 @@ function writeProgress(jobId, progress, total) {
 
       await page.waitForTimeout(randBetween(3000, 5000)); // Wait for results to load
 
-      console.log('Searching for "View email" and "Find phone" buttons...');
-      const revealButtons = await page.locator('button:has-text("View email"), button:has-text("Find phone")').all();
-      console.log(`Found ${revealButtons.length} reveal buttons.`);
+      console.log('Searching for "View email" buttons...');
+      const viewEmailButtons = await page.locator('button:has-text("View email")').all();
+      console.log(`Found ${viewEmailButtons.length} "View email" buttons.`);
 
-      for (const button of revealButtons) {
+      for (const button of viewEmailButtons) {
         try {
-          await button.click({timeout: 5000});
-          console.log('Clicked a reveal button.');
-          await page.waitForTimeout(randBetween(500, 1000)); // Stagger clicks to allow UI to update
+          if (await button.isVisible()) {
+            await button.click({timeout: 5000});
+            console.log('Clicked a "View email" button.');
+            await page.waitForTimeout(randBetween(500, 1000)); // Stagger clicks to allow UI to update
+          }
         } catch (clickErr) {
-            console.log("Could not click a reveal button, it might have disappeared or was not clickable.");
+            console.log("Could not click a 'View email' button, it might have disappeared or was not clickable.");
         }
       }
       
-      await page.waitForTimeout(2000); // Final wait for all content to be revealed
+      console.log('Searching for "Find phone" buttons...');
+      const findPhoneButtons = await page.locator('button.w-\\[79px\\].h-5.rounded-md.text-\\[12px\\].leading-\\[18px\\].font-semibold.bg-\\[\\#F0EEFF\\].ml-3.reveal-btn.css-1oga2ar:has-text("Find phone")').all();
+      console.log(`Found ${findPhoneButtons.length} "Find phone" buttons.`);
+
+      for (const button of findPhoneButtons) {
+        try {
+          if (await button.isVisible()) {
+            await button.click({timeout: 5000});
+            console.log('Clicked a "Find phone" button.');
+            await page.waitForTimeout(randBetween(500, 1000)); // Stagger clicks to allow UI to update
+          }
+        } catch (clickErr) {
+            console.log("Could not click a 'Find phone' button, it might have disappeared or was not clickable.");
+        }
+      }
+      
+      await page.waitForTimeout(4000); // Final wait for all content to be revealed
 
       let extractedEmails = [];
       let extractedPhones = [];
 
-      if (EMAIL_ITEM_SELECTOR && await page.locator(EMAIL_ITEM_SELECTOR).first().isVisible({ timeout: 5000 }).catch(() => false)) {
-        extractedEmails = await page.locator(EMAIL_ITEM_SELECTOR).allInnerTexts();
+      const infoDivs = await page.locator('div[data-testid="contact-infotext-wrapper"] div.css-bsfhvb').all();
+      console.log(`Found ${infoDivs.length} potential contact info divs.`);
+      for (const div of infoDivs) {
+          const text = await div.innerText();
+          if (text.includes('@')) {
+              if (!text.includes('*')) {
+                  console.log(`Found email: ${text}`);
+                  extractedEmails.push(text);
+              }
+          } else {
+              const phoneRe = /^\+?[0-9\s-()]+$/; // Matches digits, +, -, (, ), and space
+              if (phoneRe.test(text) && !text.includes('*') && text.length > 5) {
+                  console.log(`Found phone: ${text}`);
+                  extractedPhones.push(text);
+              }
+          }
       }
-      const revealButton = page.locator(PHONE_REVEAL_BUTTON_SELECTOR);
-      if (PHONE_REVEAL_BUTTON_SELECTOR && await revealButton.isVisible().catch(() => false)) {
-        await revealButton.click();
-        await page.waitForTimeout(randBetween(1500, 2500));
-      }
-      if (PHONE_ITEM_SELECTOR && await page.locator(PHONE_ITEM_SELECTOR).first().isVisible().catch(() => false)) {
-        const phoneText = await page.locator(PHONE_ITEM_SELECTOR).first().innerText();
-        if (!phoneText.includes('*')) {
-            extractedPhones.push(phoneText);
-        }
-      }
+
+      // Fallback if nothing was found
       if (extractedEmails.length === 0 && extractedPhones.length === 0) {
           if (RESULT_CONTAINER_SELECTOR && await page.locator(RESULT_CONTAINER_SELECTOR).first().isVisible({ timeout: 2000 }).catch(()=>false)) {
+              console.log('Using fallback regex search...');
               const raw = await page.locator(RESULT_CONTAINER_SELECTOR).first().innerText();
               const emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/g;
-              extractedEmails = raw.match(emailRe) || [];
-              const phoneRe = /(\+\d{1,3}[-.\s]?)?\d{6,15}/g;
+              extractedEmails = (raw.match(emailRe) || []).filter(e => !e.includes('*'));
+              const phoneRe = /(?:\+?\d{1,3})?[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}/g;
               const foundPhones = (raw.match(phoneRe) || []);
               extractedPhones = foundPhones.filter(p => !p.includes('*'));
           }
