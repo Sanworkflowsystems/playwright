@@ -151,7 +151,35 @@ function writeProgress(jobId, progress, total) {
 
       // Fill in search inputs
       await page.fill(NAME_INPUT_SELECTOR, fullName);
-      await page.fill(COMPANY_INPUT_SELECTOR, companyName);
+      try {
+        // Set a timeout for filling the company name
+        await page.fill(COMPANY_INPUT_SELECTOR, companyName, { timeout: 30000 });
+      } catch (e) {
+        if (e.name === 'TimeoutError') {
+          console.log('Timeout filling company name. Attempting to clear the field and retry.');
+
+          // The user provided a selector for the 'clear' icon.
+          // It's inside a div with class 'contactout-select__clear-indicator'.
+          // Let's target the clickable div.
+          const clearButton = page.locator('div.contactout-select__clear-indicator');
+
+          if (await clearButton.isVisible()) {
+            console.log('Found clear button. Clicking to clear company field.');
+            await clearButton.click();
+            // Wait a bit for the UI to update after clearing.
+            await page.waitForTimeout(randBetween(500, 1000));
+            // Retry filling the company name
+            await page.fill(COMPANY_INPUT_SELECTOR, companyName);
+          } else {
+            console.error('Company field fill timed out, but clear button was not found. The row will likely fail.');
+            // Re-throw the original error if we can't clear.
+            throw e;
+          }
+        } else {
+          // Re-throw any other errors
+          throw e;
+        }
+      }
 
       await Promise.all([
         page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => console.log("No navigation after click, continuing...")),
