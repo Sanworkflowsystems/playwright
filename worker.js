@@ -42,7 +42,7 @@ const personalEmailDomains = [
 function randBetween(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
 function getDynamicWaitTime() {
-  return randBetween(8000, 12000); // 8-12 seconds
+  return randBetween(3000, 5000); // 3-5 seconds
 }
 
 // New function to wait for a file signal from the UI
@@ -122,6 +122,12 @@ function writeProgress(jobId, progress, total) {
     throw new Error('Login failed or search form not found on page. Please check your cookies or manual login.');
   }
 
+  const outputHeaders = headers.map(h => ({id: h, title: h}));
+  const csvWriter = createCsvWriter({
+    path: outputPath,
+    header: outputHeaders
+  });
+
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const fullName = row[headers[FULL_NAME_COLUMN_INDEX]] || '';
@@ -146,7 +152,7 @@ function writeProgress(jobId, progress, total) {
             await page.waitForTimeout(randBetween(20, 50));
           }
         }
-        await page.waitForTimeout(randBetween(500, 1000));
+        await page.waitForTimeout(randBetween(300, 600));
       }
 
       // Fill in search inputs
@@ -167,7 +173,7 @@ function writeProgress(jobId, progress, total) {
             console.log('Found clear button. Clicking to clear company field.');
             await clearButton.click();
             // Wait a bit for the UI to update after clearing.
-            await page.waitForTimeout(randBetween(500, 1000));
+            await page.waitForTimeout(randBetween(300, 600));
             // Retry filling the company name
             await page.fill(COMPANY_INPUT_SELECTOR, companyName);
           } else {
@@ -186,47 +192,48 @@ function writeProgress(jobId, progress, total) {
         page.click(SUBMIT_BUTTON_SELECTOR)
       ]);
 
-      await page.waitForTimeout(randBetween(3000, 5000)); // Wait for results to load
+      await page.waitForTimeout(randBetween(2000, 4000)); // Wait for results to load
 
       console.log('Searching for "View email" buttons...');
       const viewEmailButtons = await page.locator('button:has-text("View email")').all();
-      console.log(`Found ${viewEmailButtons.length} "View email" buttons.`);
+      console.log(`Found ${viewEmailButtons.length} "View email" buttons. Will only click the first.`);
 
-      for (const button of viewEmailButtons) {
+      if (viewEmailButtons.length > 0) {
         try {
-          if (await button.isVisible()) {
-            await button.click({timeout: 5000});
-            console.log('Clicked a "View email" button.');
-            await page.waitForTimeout(randBetween(500, 1000)); // Stagger clicks to allow UI to update
+          if (await viewEmailButtons[0].isVisible()) {
+            await viewEmailButtons[0].click({timeout: 5000});
+            console.log('Clicked the first "View email" button.');
+            await page.waitForTimeout(randBetween(300, 600));
           }
         } catch (clickErr) {
-            console.log("Could not click a 'View email' button, it might have disappeared or was not clickable.");
+            console.log("Could not click the 'View email' button, it might have disappeared or was not clickable.");
         }
       }
       
       console.log('Searching for "Find phone" buttons...');
       const findPhoneButtons = await page.locator('button.w-\\[79px\\].h-5.rounded-md.text-\\[12px\\].leading-\\[18px\\].font-semibold.bg-\\[\\#F0EEFF\\].ml-3.reveal-btn.css-1oga2ar:has-text("Find phone")').all();
-      console.log(`Found ${findPhoneButtons.length} "Find phone" buttons.`);
+      console.log(`Found ${findPhoneButtons.length} "Find phone" buttons. Will only click the first.`);
 
-      for (const button of findPhoneButtons) {
+      if (findPhoneButtons.length > 0) {
         try {
-          if (await button.isVisible()) {
-            await button.click({timeout: 5000});
-            console.log('Clicked a "Find phone" button.');
-            await page.waitForTimeout(randBetween(500, 1000)); // Stagger clicks to allow UI to update
+          if (await findPhoneButtons[0].isVisible()) {
+            await findPhoneButtons[0].click({timeout: 5000});
+            console.log('Clicked the first "Find phone" button.');
+            await page.waitForTimeout(randBetween(300, 600));
           }
         } catch (clickErr) {
-            console.log("Could not click a 'Find phone' button, it might have disappeared or was not clickable.");
+            console.log("Could not click the 'Find phone' button, it might have disappeared or was not clickable.");
         }
       }
-      
-      await page.waitForTimeout(4000); // Final wait for all content to be revealed
+
+      await page.waitForTimeout(3000); // Final wait for all content to be revealed
 
       let extractedEmails = [];
       let extractedPhones = [];
 
-      const infoDivs = await page.locator('div[data-testid="contact-infotext-wrapper"] div.css-bsfhvb').all();
-      console.log(`Found ${infoDivs.length} potential contact info divs.`);
+      const firstCard = page.locator('div[data-testid="contact-infotext-wrapper"]').first();
+      const infoDivs = await firstCard.locator('div.css-bsfhvb').all();
+      console.log(`Found ${infoDivs.length} potential contact info divs in first result card.`);
       for (const div of infoDivs) {
           const text = await div.innerText();
           if (text.includes('@')) {
@@ -281,6 +288,8 @@ function writeProgress(jobId, progress, total) {
       if(row.hasOwnProperty('Notes')) row['Notes'] = err.message.substring(0, 500);
     }
     
+    // Write the processed row to CSV
+    await csvWriter.writeRecords([row]);
 
 
     const wait = getDynamicWaitTime();
@@ -290,14 +299,6 @@ function writeProgress(jobId, progress, total) {
 
   await context.close();
   console.log('Worker finished, output saved to', outputPath);
-
-  // Write the final results once at the end
-  const outputHeaders = headers.map(h => ({id: h, title: h}));
-  const csvWriter = createCsvWriter({
-    path: outputPath,
-    header: outputHeaders
-  });
-  await csvWriter.writeRecords(rows); 
 
   process.exit(0);
 })();
