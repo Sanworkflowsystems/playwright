@@ -6,19 +6,27 @@ const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 const { chromium } = require('playwright');
 
 const jobId = process.argv[2];
-const inputPath = process.argv[3];
-const outputPath = process.argv[4];
+const SHEET_MODE = process.argv[3] === '--sheet-mode';
+const inputPath  = SHEET_MODE ? null : process.argv[3];
+const outputPath = SHEET_MODE ? null : process.argv[4];
 
-if(!jobId || !inputPath || !outputPath) {
+if (!jobId) {
+  console.error('Usage: node worker.js <jobId> [--sheet-mode | <inputCsv> <outputCsv>]');
+  process.exit(2);
+}
+if (!SHEET_MODE && (!inputPath || !outputPath)) {
   console.error('Usage: node worker.js <jobId> <inputCsv> <outputCsv>');
   process.exit(2);
 }
 
+const SHEET_ID   = process.env.SHEET_ID || '';
+const SHEET_NAME = process.env.SHEET_NAME || 'Sheet1';
+
 const userDataDir = path.join(__dirname, 'playwright_profile'); // persistent profile
-if(!fs.existsSync(userDataDir)) fs.mkdirSync(userDataDir);
+if (!fs.existsSync(userDataDir)) fs.mkdirSync(userDataDir);
 
 const selectorsConfig = process.env.JOB_SELECTORS ? JSON.parse(process.env.JOB_SELECTORS) : {};
-const COOKIES_STRING = process.env.JOB_COOKIES || ''; // optional cookie string
+const COOKIES_STRING = process.env.JOB_COOKIES || '';
 const MANUAL_LOGIN = process.env.JOB_MANUAL === '1';
 const IS_HEADLESS = false; // FOR LOCAL DEBUGGING
 
@@ -45,46 +53,77 @@ function getDynamicWaitTime() {
   return randBetween(5000, 8000); // 5-8 seconds
 }
 
-// New function to wait for a file signal from the UI
 async function waitForStartSignal(jobId) {
-    const signalPath = path.join(__dirname, 'outputs', `${jobId}.start`);
-    console.log('Waiting for start signal from UI...');
-    while (true) {
-        if (fs.existsSync(signalPath)) {
-            try {
-                fs.unlinkSync(signalPath); // Clean up the signal file
-            } catch (e) {
-                console.error("Could not remove signal file, continuing...", e);
-            }
-            console.log('Start signal received. Starting processing...');
-            break;
-        }
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Check every second
+  const signalPath = path.join(__dirname, 'outputs', `${jobId}.start`);
+  console.log('Waiting for start signal from UI...');
+  while (true) {
+    if (fs.existsSync(signalPath)) {
+      try { fs.unlinkSync(signalPath); } catch (e) { console.error("Could not remove signal file, continuing...", e); }
+      console.log('Start signal received. Starting processing...');
+      break;
     }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
 }
 
-// Updated to return headers
 async function readCSV(file) {
   return new Promise((res, rej) => {
     const rows = [];
     const stream = fs.createReadStream(file).pipe(csv());
     stream.on('data', data => rows.push(data));
-    stream.on('end', () => res({rows: rows, headers: stream.headers}));
+    stream.on('end', () => res({ rows, headers: stream.headers }));
     stream.on('error', err => rej(err));
   });
 }
 
 function writeProgress(jobId, progress, total) {
-    const statusPayload = { progress, total, status: 'running' };
-    const statusPath = path.join(__dirname, 'outputs', `${jobId}.json`);
-    fs.writeFileSync(statusPath, JSON.stringify(statusPayload));
+  const statusPayload = { progress, total, status: 'running' };
+  const statusPath = path.join(__dirname, 'outputs', `${jobId}.json`);
+  fs.writeFileSync(statusPath, JSON.stringify(statusPayload));
 }
 
+// ---- Google Sheets client (sheet mode only) ----
+let sheetsClient = null;
+if (SHEET_MODE) {
+  const { google } = require('googleapis');
+  const { OAuth2Client } = require('google-auth-library');
+  const rawCreds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+  const { client_id, client_secret } = rawCreds.installed || rawCreds.web;
+  const oauth2Client = new OAuth2Client(client_id, client_secret, 'http://localhost:3000/auth/google/callback');
+  oauth2Client.setCredentials(JSON.parse(process.env.GOOGLE_TOKENS));
+  oauth2Client.on('tokens', (tokens) => {
+    const existing = process.env.GOOGLE_TOKENS ? JSON.parse(process.env.GOOGLE_TOKENS) : {};
+    fs.writeFileSync(path.join(__dirname, 'tokens.json'), JSON.stringify({ ...existing, ...tokens }));
+  });
+  sheetsClient = google.sheets({ version: 'v4', auth: oauth2Client });
+}
+
+const {
+  readSheetData,
+  ensureProcessedColumn,
+  updateSheetRow,
+  markRowProcessed,
+  columnLetter
+} = SHEET_MODE ? require('./google-sheets-helper') : {};
+
 (async () => {
-  const { rows, headers } = await readCSV(inputPath);
+  let rows, headers;
+
+  if (SHEET_MODE) {
+    console.log(`Reading data from Google Sheet: ${SHEET_ID} / ${SHEET_NAME}`);
+    ({ rows, headers } = await readSheetData(sheetsClient, SHEET_ID, SHEET_NAME));
+    await ensureProcessedColumn(sheetsClient, SHEET_ID, SHEET_NAME, headers, rows.length);
+    // Sync rows: add the processed column value to any rows that didn't have it
+    rows.forEach(row => { if (!row.hasOwnProperty('contactout_processed')) row['contactout_processed'] = '0'; });
+  } else {
+    ({ rows, headers } = await readCSV(inputPath));
+  }
+
+  const processedColIndex = headers.indexOf('contactout_processed');
+  const processedColLetter = processedColIndex >= 0 ? columnLetter(processedColIndex) : null;
 
   const browserContextOptions = {
-    viewport: { width:1280, height:800 },
+    viewport: { width: 1280, height: 800 },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
   };
   const context = await chromium.launchPersistentContext(userDataDir, {
@@ -100,10 +139,10 @@ function writeProgress(jobId, progress, total) {
     const cookies = pairs.map(p => {
       const [name, ...rest] = p.split('=');
       return { name: name.trim(), value: rest.join('=').trim(), domain: '.contactout.com', path: '/' };
-    }
-    );
+    });
     await context.addCookies(cookies);
   }
+
   const initialUrl = SEARCH_PAGE_URL || 'https://contactout.com/dashboard/search';
   await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
   if (MANUAL_LOGIN) {
@@ -122,24 +161,36 @@ function writeProgress(jobId, progress, total) {
     throw new Error('Login failed or search form not found on page. Please check your cookies or manual login.');
   }
 
+  // CSV writer setup (CSV mode only)
+  let csvWriter = null;
+  if (!SHEET_MODE) {
+    const outputHeaders = headers.map(h => ({ id: h, title: h }));
+    csvWriter = createCsvWriter({ path: outputPath, header: outputHeaders });
+  }
+
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
+
+    // Skip already-processed rows instantly (sheet mode)
+    if (SHEET_MODE && row['contactout_processed'] === '1') {
+      console.log(`[${i + 1}/${rows.length}] Skipping already-processed row (${row[headers[FULL_NAME_COLUMN_INDEX]] || 'unknown'})`);
+      writeProgress(jobId, i + 1, rows.length);
+      continue;
+    }
+
     const fullName = row[headers[FULL_NAME_COLUMN_INDEX]] || '';
     const companyName = row[headers[COMPANY_NAME_COLUMN_INDEX]] || '';
 
-    console.log(`[${i + 1}/${rows.length}] processing Name: ${fullName}, Company: ${companyName}`);
+    console.log(`[${i + 1}/${rows.length}] Processing Name: ${fullName}, Company: ${companyName}`);
     writeProgress(jobId, i + 1, rows.length);
 
     try {
       if (i > 0) {
-        // Clear ALL company tags — use the clear-all X button if present,
-        // otherwise loop and remove individual tags one by one
         const clearAllButton = page.locator('div.contactout-select__clear-indicator');
         if (await clearAllButton.isVisible({ timeout: 1000 }).catch(() => false)) {
           await clearAllButton.click();
           await page.waitForTimeout(randBetween(150, 300));
         } else {
-          // Fallback: remove tags one by one until none remain
           let removeBtn = page.locator('div.contactout-select__multi-value__remove').first();
           while (await removeBtn.isVisible({ timeout: 500 }).catch(() => false)) {
             await removeBtn.click();
@@ -158,34 +209,23 @@ function writeProgress(jobId, progress, total) {
         await page.waitForTimeout(randBetween(500, 1000));
       }
 
-      // Fill in search inputs
       await page.fill(NAME_INPUT_SELECTOR, fullName);
       try {
-        // Set a timeout for filling the company name
         await page.fill(COMPANY_INPUT_SELECTOR, companyName, { timeout: 30000 });
       } catch (e) {
         if (e.name === 'TimeoutError') {
           console.log('Timeout filling company name. Attempting to clear the field and retry.');
-
-          // The user provided a selector for the 'clear' icon.
-          // It's inside a div with class 'contactout-select__clear-indicator'.
-          // Let's target the clickable div.
           const clearButton = page.locator('div.contactout-select__clear-indicator');
-
           if (await clearButton.isVisible()) {
             console.log('Found clear button. Clicking to clear company field.');
             await clearButton.click();
-            // Wait a bit for the UI to update after clearing.
             await page.waitForTimeout(randBetween(500, 1000));
-            // Retry filling the company name
             await page.fill(COMPANY_INPUT_SELECTOR, companyName);
           } else {
             console.error('Company field fill timed out, but clear button was not found. The row will likely fail.');
-            // Re-throw the original error if we can't clear.
             throw e;
           }
         } else {
-          // Re-throw any other errors
           throw e;
         }
       }
@@ -204,15 +244,15 @@ function writeProgress(jobId, progress, total) {
       if (viewEmailButtons.length > 0) {
         try {
           if (await viewEmailButtons[0].isVisible()) {
-            await viewEmailButtons[0].click({timeout: 5000});
+            await viewEmailButtons[0].click({ timeout: 5000 });
             console.log('Clicked the first "View email" button.');
             await page.waitForTimeout(randBetween(2300, 2600));
           }
         } catch (clickErr) {
-            console.log("Could not click the 'View email' button, it might have disappeared or was not clickable.");
+          console.log("Could not click the 'View email' button, it might have disappeared or was not clickable.");
         }
       }
-      
+
       console.log('Searching for "Find phone" buttons...');
       const findPhoneButtons = await page.locator('button.w-\\[79px\\].h-5.rounded-md.text-\\[12px\\].leading-\\[18px\\].font-semibold.bg-\\[\\#F0EEFF\\].ml-3.reveal-btn.css-1oga2ar:has-text("Find phone")').all();
       console.log(`Found ${findPhoneButtons.length} "Find phone" buttons.`);
@@ -220,12 +260,12 @@ function writeProgress(jobId, progress, total) {
       if (findPhoneButtons.length > 0) {
         try {
           if (await findPhoneButtons[0].isVisible()) {
-            await findPhoneButtons[0].click({timeout: 5000});
+            await findPhoneButtons[0].click({ timeout: 5000 });
             console.log('Clicked the first "Find phone" button.');
             await page.waitForTimeout(randBetween(2300, 2600));
           }
         } catch (clickErr) {
-            console.log("Could not click the 'Find phone' button, it might have disappeared or was not clickable.");
+          console.log("Could not click the 'Find phone' button, it might have disappeared or was not clickable.");
         }
       }
 
@@ -237,32 +277,31 @@ function writeProgress(jobId, progress, total) {
       const infoDivs = await page.locator('div[data-testid="contact-infotext-wrapper"] div.css-bsfhvb').all();
       console.log(`Found ${infoDivs.length} potential contact info divs.`);
       for (const div of infoDivs) {
-          const text = await div.innerText();
-          if (text.includes('@')) {
-              if (!text.includes('*')) {
-                  console.log(`Found email: ${text}`);
-                  extractedEmails.push(text);
-              }
-          } else {
-              const phoneRe = /^\+?[0-9\s-()]+$/; // Matches digits, +, -, (, ), and space
-              if (phoneRe.test(text) && !text.includes('*') && text.length > 5) {
-                  console.log(`Found phone: ${text}`);
-                  extractedPhones.push(text);
-              }
+        const text = await div.innerText();
+        if (text.includes('@')) {
+          if (!text.includes('*')) {
+            console.log(`Found email: ${text}`);
+            extractedEmails.push(text);
           }
+        } else {
+          const phoneRe = /^\+?[0-9\s-()]+$/;
+          if (phoneRe.test(text) && !text.includes('*') && text.length > 5) {
+            console.log(`Found phone: ${text}`);
+            extractedPhones.push(text);
+          }
+        }
       }
 
       // Fallback if nothing was found
       if (extractedEmails.length === 0 && extractedPhones.length === 0) {
-          if (RESULT_CONTAINER_SELECTOR && await page.locator(RESULT_CONTAINER_SELECTOR).first().isVisible({ timeout: 2000 }).catch(()=>false)) {
-              console.log('Using fallback regex search...');
-              const raw = await page.locator(RESULT_CONTAINER_SELECTOR).first().innerText();
-              const emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/g;
-              extractedEmails = (raw.match(emailRe) || []).filter(e => !e.includes('*'));
-              const phoneRe = /(?:\+?\d{1,3})?[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}/g;
-              const foundPhones = (raw.match(phoneRe) || []);
-              extractedPhones = foundPhones.filter(p => !p.includes('*'));
-          }
+        if (RESULT_CONTAINER_SELECTOR && await page.locator(RESULT_CONTAINER_SELECTOR).first().isVisible({ timeout: 2000 }).catch(() => false)) {
+          console.log('Using fallback regex search...');
+          const raw = await page.locator(RESULT_CONTAINER_SELECTOR).first().innerText();
+          const emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/g;
+          extractedEmails = (raw.match(emailRe) || []).filter(e => !e.includes('*'));
+          const phoneRe = /(?:\+?\d{1,3})?[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}/g;
+          extractedPhones = (raw.match(phoneRe) || []).filter(p => !p.includes('*'));
+        }
       }
 
       const personalEmails = [];
@@ -275,8 +314,7 @@ function writeProgress(jobId, progress, total) {
           workEmails.push(email);
         }
       }
-      
-      // Directly modify the row object
+
       if (row.hasOwnProperty('Personal Email')) row['Personal Email'] = personalEmails.shift() || row['Personal Email'];
       if (row.hasOwnProperty('Other Personal Emails')) row['Other Personal Emails'] = personalEmails.join('; ') || row['Other Personal Emails'];
       if (row.hasOwnProperty('Work Email')) row['Work Email'] = workEmails.shift() || row['Work Email'];
@@ -284,29 +322,34 @@ function writeProgress(jobId, progress, total) {
       if (row.hasOwnProperty('Work Email Status')) row['Work Email Status'] = (workEmails.length > 0 || (row['Work Email'] && row['Work Email'].length > 0)) ? 'Found' : '';
       if (row.hasOwnProperty('Phone Number')) row['Phone Number'] = extractedPhones.shift() || row['Phone Number'];
       if (row.hasOwnProperty('Other Phone Numbers')) row['Other Phone Numbers'] = extractedPhones.join('; ') || row['Other Phone Numbers'];
-      
+
     } catch (err) {
       console.error('Error processing row', i, err);
-      if(row.hasOwnProperty('Notes')) row['Notes'] = err.message.substring(0, 500);
+      if (row.hasOwnProperty('Notes')) row['Notes'] = err.message.substring(0, 500);
     }
-    
 
+    // Write results
+    if (SHEET_MODE) {
+      const sheetRowNumber = i + 2; // header = row 1, first data = row 2
+      await updateSheetRow(sheetsClient, SHEET_ID, SHEET_NAME, sheetRowNumber, headers, row);
+      await markRowProcessed(sheetsClient, SHEET_ID, SHEET_NAME, sheetRowNumber, processedColLetter);
+      console.log(`Row ${i + 1} written to Google Sheet.`);
+    } else {
+      await csvWriter.writeRecords([row]);
+    }
 
     const wait = getDynamicWaitTime();
-    console.log(`Waiting ${Math.round(wait/1000)}s before next`);
+    console.log(`Waiting ${Math.round(wait / 1000)}s before next`);
     await page.waitForTimeout(wait);
   }
 
   await context.close();
-  console.log('Worker finished, output saved to', outputPath);
 
-  // Write the final results once at the end
-  const outputHeaders = headers.map(h => ({id: h, title: h}));
-  const csvWriter = createCsvWriter({
-    path: outputPath,
-    header: outputHeaders
-  });
-  await csvWriter.writeRecords(rows); 
+  if (SHEET_MODE) {
+    console.log('Worker finished. Results written to Google Sheet.');
+  } else {
+    console.log('Worker finished, output saved to', outputPath);
+  }
 
   process.exit(0);
 })();

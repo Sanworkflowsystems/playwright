@@ -8,12 +8,28 @@
     body { font-family: sans-serif; line-height: 1.6; padding: 2em; max-width: 960px; margin: 0 auto; }
     h2 { margin-bottom: 0.5em; }
 
+    /* Mode selector */
+    #modeSelector { margin-bottom: 1.2em; display: flex; gap: 1.5em; }
+    #modeSelector label { display: flex; align-items: center; gap: 0.4em; font-size: 1em; cursor: pointer; }
+
     /* Upload section */
-    #uploadSection {}
     .slot-row { display: flex; align-items: center; gap: 0.75em; margin-bottom: 0.6em; }
     .slot-label { min-width: 60px; font-weight: bold; }
     .slot-filename { color: #555; font-size: 0.9em; font-style: italic; }
     .optional-badge { font-size: 0.75em; color: #888; margin-left: 0.3em; }
+
+    /* Sheet mode */
+    #sheetsMode { display: none; }
+    .sheet-slot-row { display: flex; align-items: center; gap: 0.75em; margin-bottom: 0.6em; flex-wrap: wrap; }
+    .sheet-url-input { width: 380px; padding: 0.3em 0.5em; font-size: 0.95em; border: 1px solid #ccc; border-radius: 4px; }
+    .sheet-tab-input { width: 120px; padding: 0.3em 0.5em; font-size: 0.95em; border: 1px solid #ccc; border-radius: 4px; }
+    #authBanner { margin-bottom: 1em; padding: 0.6em 1em; border-radius: 4px; font-size: 0.95em; }
+    #authBanner.authed { background: #d4edda; border: 1px solid #28a745; color: #155724; }
+    #authBanner.unauthed { background: #f8d7da; border: 1px solid #dc3545; color: #721c24; }
+    #authBanner.checking { background: #fff3cd; border: 1px solid #ffc107; color: #856404; }
+    #authLink { color: #1976d2; font-weight: bold; }
+    #checkAuthBtn { margin-left: 1em; padding: 0.2em 0.8em; cursor: pointer; }
+
     #uploadOptions { margin-top: 1.2em; }
     #uploadOptions label { display: block; margin-bottom: 0.4em; }
     textarea { width: 100%; max-width: 500px; }
@@ -28,7 +44,6 @@
     #stopBatchBtn:disabled { background: #aaa; cursor: default; }
 
     .panels-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1em; }
-
     .job-panel { border: 1px solid #ccc; border-radius: 6px; padding: 1em; display: none; }
     .job-panel.visible { display: block; }
     .panel-filename { font-weight: bold; margin-bottom: 0.3em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -44,33 +59,81 @@
   <!-- Phase 1: Upload -->
   <div id="uploadSection">
     <h2>ContactOut Batch Enrichment</h2>
-    <p>Upload up to 5 CSV files. Each file will be processed in a separate browser tab simultaneously.</p>
 
-    <div id="slots">
-      <div class="slot-row" data-slot="0">
-        <span class="slot-label">Slot 1</span>
-        <input type="file" accept=".csv" class="slot-file-input" />
-        <span class="slot-filename"></span>
+    <!-- Mode selector -->
+    <div id="modeSelector">
+      <label><input type="radio" name="mode" value="csv" checked /> Upload CSV files</label>
+      <label><input type="radio" name="mode" value="sheets" /> Use Google Sheets</label>
+    </div>
+
+    <!-- CSV Mode -->
+    <div id="csvMode">
+      <p>Upload up to 5 CSV files. Each file will be processed in a separate browser tab simultaneously.</p>
+      <div id="slots">
+        <div class="slot-row" data-slot="0">
+          <span class="slot-label">Slot 1</span>
+          <input type="file" accept=".csv" class="slot-file-input" />
+          <span class="slot-filename"></span>
+        </div>
+        <div class="slot-row" data-slot="1">
+          <span class="slot-label">Slot 2 <span class="optional-badge">(optional)</span></span>
+          <input type="file" accept=".csv" class="slot-file-input" />
+          <span class="slot-filename"></span>
+        </div>
+        <div class="slot-row" data-slot="2">
+          <span class="slot-label">Slot 3 <span class="optional-badge">(optional)</span></span>
+          <input type="file" accept=".csv" class="slot-file-input" />
+          <span class="slot-filename"></span>
+        </div>
+        <div class="slot-row" data-slot="3">
+          <span class="slot-label">Slot 4 <span class="optional-badge">(optional)</span></span>
+          <input type="file" accept=".csv" class="slot-file-input" />
+          <span class="slot-filename"></span>
+        </div>
+        <div class="slot-row" data-slot="4">
+          <span class="slot-label">Slot 5 <span class="optional-badge">(optional)</span></span>
+          <input type="file" accept=".csv" class="slot-file-input" />
+          <span class="slot-filename"></span>
+        </div>
       </div>
-      <div class="slot-row" data-slot="1">
-        <span class="slot-label">Slot 2 <span class="optional-badge">(optional)</span></span>
-        <input type="file" accept=".csv" class="slot-file-input" />
-        <span class="slot-filename"></span>
+    </div>
+
+    <!-- Google Sheets Mode -->
+    <div id="sheetsMode">
+      <p>Paste up to 5 Google Sheet URLs. Results will be written back to each sheet in real-time.</p>
+
+      <div id="authBanner" class="checking">Checking Google authentication status...</div>
+      <div id="authLinkSection" style="display:none; margin-bottom: 1em;">
+        <a id="authLink" href="/auth/google" target="_blank">Click here to authenticate with Google</a>
+        <button id="checkAuthBtn">I've authenticated — check again</button>
       </div>
-      <div class="slot-row" data-slot="2">
-        <span class="slot-label">Slot 3 <span class="optional-badge">(optional)</span></span>
-        <input type="file" accept=".csv" class="slot-file-input" />
-        <span class="slot-filename"></span>
-      </div>
-      <div class="slot-row" data-slot="3">
-        <span class="slot-label">Slot 4 <span class="optional-badge">(optional)</span></span>
-        <input type="file" accept=".csv" class="slot-file-input" />
-        <span class="slot-filename"></span>
-      </div>
-      <div class="slot-row" data-slot="4">
-        <span class="slot-label">Slot 5 <span class="optional-badge">(optional)</span></span>
-        <input type="file" accept=".csv" class="slot-file-input" />
-        <span class="slot-filename"></span>
+
+      <div id="sheetSlots">
+        <div class="sheet-slot-row" data-slot="0">
+          <span class="slot-label">Slot 1</span>
+          <input type="text" class="sheet-url-input" placeholder="https://docs.google.com/spreadsheets/d/..." />
+          <input type="text" class="sheet-tab-input" placeholder="Tab name (e.g. Sheet1)" />
+        </div>
+        <div class="sheet-slot-row" data-slot="1">
+          <span class="slot-label">Slot 2 <span class="optional-badge">(optional)</span></span>
+          <input type="text" class="sheet-url-input" placeholder="https://docs.google.com/spreadsheets/d/..." />
+          <input type="text" class="sheet-tab-input" placeholder="Tab name (e.g. Sheet1)" />
+        </div>
+        <div class="sheet-slot-row" data-slot="2">
+          <span class="slot-label">Slot 3 <span class="optional-badge">(optional)</span></span>
+          <input type="text" class="sheet-url-input" placeholder="https://docs.google.com/spreadsheets/d/..." />
+          <input type="text" class="sheet-tab-input" placeholder="Tab name (e.g. Sheet1)" />
+        </div>
+        <div class="sheet-slot-row" data-slot="3">
+          <span class="slot-label">Slot 4 <span class="optional-badge">(optional)</span></span>
+          <input type="text" class="sheet-url-input" placeholder="https://docs.google.com/spreadsheets/d/..." />
+          <input type="text" class="sheet-tab-input" placeholder="Tab name (e.g. Sheet1)" />
+        </div>
+        <div class="sheet-slot-row" data-slot="4">
+          <span class="slot-label">Slot 5 <span class="optional-badge">(optional)</span></span>
+          <input type="text" class="sheet-url-input" placeholder="https://docs.google.com/spreadsheets/d/..." />
+          <input type="text" class="sheet-tab-input" placeholder="Tab name (e.g. Sheet1)" />
+        </div>
       </div>
     </div>
 

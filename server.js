@@ -6,6 +6,8 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
+const { google } = require('googleapis');
+const { OAuth2Client } = require('google-auth-library');
 
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
@@ -26,6 +28,47 @@ const HARDCODED_SELECTORS = {
     "PHONE_ITEM_SELECTOR": "div.css-2c062s div.css-bsfhvb"
 };
 
+// ---- Google OAuth2 Setup ----
+const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
+const TOKENS_PATH = path.join(__dirname, 'tokens.json');
+const CREDENTIALS_PATH = path.join(__dirname, 'credentials.json');
+
+let oauth2Client = null;
+let sheetsClient = null;
+
+function loadGoogleCredentials() {
+  if (!fs.existsSync(CREDENTIALS_PATH)) {
+    console.warn('credentials.json not found — Google Sheets mode will be unavailable.');
+    return;
+  }
+  try {
+    const creds = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));
+    const { client_id, client_secret } = creds.installed || creds.web;
+    oauth2Client = new OAuth2Client(client_id, client_secret, 'http://localhost:3000/auth/google/callback');
+
+    if (fs.existsSync(TOKENS_PATH)) {
+      oauth2Client.setCredentials(JSON.parse(fs.readFileSync(TOKENS_PATH)));
+      sheetsClient = google.sheets({ version: 'v4', auth: oauth2Client });
+    }
+
+    // Auto-save refreshed tokens
+    oauth2Client.on('tokens', (tokens) => {
+      const current = fs.existsSync(TOKENS_PATH) ? JSON.parse(fs.readFileSync(TOKENS_PATH)) : {};
+      fs.writeFileSync(TOKENS_PATH, JSON.stringify({ ...current, ...tokens }));
+      sheetsClient = google.sheets({ version: 'v4', auth: oauth2Client });
+    });
+  } catch (e) {
+    console.error('Failed to load Google credentials:', e.message);
+  }
+}
+loadGoogleCredentials();
+
+function extractSheetId(url) {
+  const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (!match) throw new Error('Invalid Google Sheet URL — cannot extract sheet ID');
+  return match[1];
+}
+
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -34,9 +77,9 @@ const upload = multer({ dest: UPLOAD_DIR });
 
 // Build output filename: "originalname_enriched.csv"
 function enrichedFilename(originalname, jobId) {
-  const ext = path.extname(originalname);          // ".csv"
-  const base = path.basename(originalname, ext);   // "leads"
-  return `${base}_enriched${ext}`;                 // "leads_enriched.csv"
+  const ext = path.extname(originalname);
+  const base = path.basename(originalname, ext);
+  return `${base}_enriched${ext}`;
 }
 
 // In-memory stores
@@ -45,9 +88,109 @@ const queue = [];
 const batches = {};
 const batchQueue = [];
 
-// Unified mutex: only one worker process at a time (both worker.js and parallel-worker.js
-// open the same playwright_profile/ — running both simultaneously causes a file lock conflict)
+// Unified mutex: only one worker process at a time
 let anyWorkerRunning = false;
+
+// ---- Google Auth endpoints ----
+
+app.get('/auth/google', (req, res) => {
+  if (!oauth2Client) return res.status(500).send('credentials.json not found on server.');
+  const url = oauth2Client.generateAuthUrl({ access_type: 'offline', scope: SCOPES, prompt: 'consent' });
+  res.redirect(url);
+});
+
+app.get('/auth/google/callback', async (req, res) => {
+  if (!oauth2Client) return res.status(500).send('OAuth client not initialised.');
+  const { code } = req.query;
+  try {
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+    fs.writeFileSync(TOKENS_PATH, JSON.stringify(tokens));
+    sheetsClient = google.sheets({ version: 'v4', auth: oauth2Client });
+    res.send('<h2>Authentication successful!</h2><p>You can close this tab and return to the app.</p>');
+  } catch (e) {
+    res.status(500).send('Authentication failed: ' + e.message);
+  }
+});
+
+app.get('/auth/status', (req, res) => {
+  res.json({ authenticated: sheetsClient !== null });
+});
+
+// ---- Google Sheets batch endpoint ----
+
+app.post('/start-sheet-batch', async (req, res) => {
+  if (!sheetsClient) return res.status(401).json({ error: 'Not authenticated with Google. Visit /auth/google first.' });
+
+  const { sheetJobs, cookies, manual_login } = req.body;
+  if (!sheetJobs || sheetJobs.length === 0) return res.status(400).json({ error: 'No sheet jobs provided.' });
+
+  const batchId = uuidv4();
+  const jobSpecsList = [];
+
+  for (let i = 0; i < sheetJobs.length; i++) {
+    const { sheetUrl, sheetName = 'Sheet1' } = sheetJobs[i];
+    let sheetId;
+    try { sheetId = extractSheetId(sheetUrl); }
+    catch (e) { return res.status(400).json({ error: `Slot ${i + 1}: ${e.message}` }); }
+
+    const jobId = uuidv4();
+    const statusPath = path.join(__dirname, 'outputs', `${jobId}.json`);
+
+    const spec = {
+      jobId,
+      slotIndex: i,
+      sheetId,
+      sheetName,
+      sheetUrl,
+      statusPath,
+      originalFilename: sheetName
+    };
+    jobSpecsList.push(spec);
+
+    jobs[jobId] = {
+      id: jobId,
+      status: 'queued',
+      sheetId,
+      sheetName,
+      sheetUrl,
+      statusPath,
+      createdAt: new Date().toISOString(),
+      progress: 0,
+      total: 0,
+      details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS }
+    };
+
+    fs.writeFileSync(statusPath, JSON.stringify({ status: 'queued', progress: 0, total: 0 }));
+  }
+
+  const batch = {
+    batchId,
+    status: 'queued',
+    jobSpecs: jobSpecsList,
+    details: { cookies, manual_login: manual_login === 'true' },
+    createdAt: new Date().toISOString(),
+    process: null,
+    isSheetMode: true
+  };
+  batches[batchId] = batch;
+  batchQueue.push(batchId);
+
+  const batchStatusPath = path.join(__dirname, 'outputs', `${batchId}.json`);
+  const initialJobs = jobSpecsList.map(s => ({
+    jobId: s.jobId,
+    slotIndex: s.slotIndex,
+    originalFilename: s.sheetName,
+    sheetUrl: s.sheetUrl,
+    status: 'queued',
+    progress: 0,
+    total: 0
+  }));
+  fs.writeFileSync(batchStatusPath, JSON.stringify({ batchId, status: 'queued', jobs: initialJobs }));
+
+  res.json({ batchId, jobSpecs: jobSpecsList });
+  runBatchQueue();
+});
 
 // ---- Single-file endpoints (backward compat) ----
 
@@ -96,7 +239,7 @@ app.get('/download/:jobId', (req, res) => {
   if (!j) return res.status(404).send('Not found');
 
   if (!fs.existsSync(j.outputPath)) {
-    return res.status(404).send('Output file not found. It may not have been created yet, or the job failed before any data was written.');
+    return res.status(404).send('Output file not found.');
   }
 
   const originalFilename = (j.details && j.details.originalFilename) ? j.details.originalFilename : `${j.id}.csv`;
@@ -150,7 +293,6 @@ app.post('/upload-batch', upload.array('files', 5), (req, res) => {
     };
     jobSpecsList.push(spec);
 
-    // Register in jobs map so /download/:jobId works
     jobs[jobId] = {
       id: jobId,
       status: 'queued',
@@ -163,7 +305,6 @@ app.post('/upload-batch', upload.array('files', 5), (req, res) => {
       details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS, originalFilename: file.originalname }
     };
 
-    // Write initial status file
     fs.writeFileSync(statusPath, JSON.stringify({ status: 'queued', progress: 0, total: 0 }));
   }
 
@@ -178,7 +319,6 @@ app.post('/upload-batch', upload.array('files', 5), (req, res) => {
   batches[batchId] = batch;
   batchQueue.push(batchId);
 
-  // Write initial batch status
   const batchStatusPath = path.join(__dirname, 'outputs', `${batchId}.json`);
   const initialJobs = jobSpecsList.map(s => ({
     jobId: s.jobId,
@@ -209,9 +349,16 @@ app.get('/batch-status/:batchId', (req, res) => {
     }
   }
 
-  // Merge per-slot status from individual job files for freshest data
   const mergedJobs = batch.jobSpecs.map(spec => {
-    let slotData = { jobId: spec.jobId, slotIndex: spec.slotIndex, originalFilename: spec.originalFilename, status: 'queued', progress: 0, total: 0 };
+    let slotData = {
+      jobId: spec.jobId,
+      slotIndex: spec.slotIndex,
+      originalFilename: spec.originalFilename || spec.sheetName,
+      sheetUrl: spec.sheetUrl || null,
+      status: 'queued',
+      progress: 0,
+      total: 0
+    };
     if (fs.existsSync(spec.statusPath)) {
       try {
         const slotFile = JSON.parse(fs.readFileSync(spec.statusPath, 'utf8'));
@@ -269,7 +416,6 @@ async function runQueue() {
     }
   }
   anyWorkerRunning = false;
-  // Check if batch queue has work now
   runBatchQueue();
 }
 
@@ -315,7 +461,6 @@ async function runBatchQueue() {
     const batch = batches[batchId];
     if (!batch) continue;
     batch.status = 'running';
-    // Update each job's status to 'running' in memory
     for (const spec of batch.jobSpecs) {
       if (jobs[spec.jobId]) jobs[spec.jobId].status = 'running';
     }
@@ -328,17 +473,20 @@ async function runBatchQueue() {
     }
   }
   anyWorkerRunning = false;
-  // Check if single queue has work now
   runQueue();
 }
 
 function runBatchWorker(batch) {
   return new Promise((resolve, reject) => {
+    const isSheetMode = !!batch.isSheetMode;
     const env = Object.assign({}, process.env, {
       BATCH_JOBS: JSON.stringify(batch.jobSpecs),
       JOB_SELECTORS: JSON.stringify(HARDCODED_SELECTORS),
       JOB_COOKIES: batch.details.cookies || '',
-      JOB_MANUAL: batch.details.manual_login ? '1' : '0'
+      JOB_MANUAL: batch.details.manual_login ? '1' : '0',
+      BATCH_SHEET_MODE: isSheetMode ? '1' : '',
+      GOOGLE_TOKENS: isSheetMode && fs.existsSync(TOKENS_PATH) ? fs.readFileSync(TOKENS_PATH, 'utf8') : '',
+      GOOGLE_CREDENTIALS: isSheetMode && fs.existsSync(CREDENTIALS_PATH) ? fs.readFileSync(CREDENTIALS_PATH, 'utf8') : '',
     });
     const child = spawn('node', ['parallel-worker.js', batch.batchId], { stdio: 'inherit', env });
     batch.process = child;

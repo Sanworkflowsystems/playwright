@@ -10,3 +10,7 @@
 # Job-specific folders
 /uploads
 /outputs
+
+# Google OAuth credentials (keep off git)
+/credentials.json
+/tokens.json
