@@ -103,7 +103,7 @@ if (SHEET_MODE) {
   const { OAuth2Client } = require('google-auth-library');
   const rawCreds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   const { client_id, client_secret } = rawCreds.installed || rawCreds.web;
-  const oauth2Client = new OAuth2Client(client_id, client_secret, 'http://localhost:3000/auth/google/callback');
+  const oauth2Client = new OAuth2Client(client_id, client_secret, 'urn:ietf:wg:oauth:2.0:oob');
   oauth2Client.setCredentials(JSON.parse(process.env.GOOGLE_TOKENS));
   oauth2Client.on('tokens', (tokens) => {
     const existing = process.env.GOOGLE_TOKENS ? JSON.parse(process.env.GOOGLE_TOKENS) : {};

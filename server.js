@@ -44,7 +44,7 @@ function loadGoogleCredentials() {
   try {
     const creds = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));
     const { client_id, client_secret } = creds.installed || creds.web;
-    oauth2Client = new OAuth2Client(client_id, client_secret, 'http://localhost:3000/auth/google/callback');
+    oauth2Client = new OAuth2Client(client_id, client_secret, 'urn:ietf:wg:oauth:2.0:oob');
 
     if (fs.existsSync(TOKENS_PATH)) {
       oauth2Client.setCredentials(JSON.parse(fs.readFileSync(TOKENS_PATH)));
@@ -96,20 +96,51 @@ let anyWorkerRunning = false;
 app.get('/auth/google', (req, res) => {
   if (!oauth2Client) return res.status(500).send('credentials.json not found on server.');
   const url = oauth2Client.generateAuthUrl({ access_type: 'offline', scope: SCOPES, prompt: 'consent' });
-  res.redirect(url);
+  // Show a page with the link + a code input box (Desktop app OOB flow)
+  res.send(`
+    <!doctype html><html><head><meta charset="utf-8"><title>Google Auth</title>
+    <style>body{font-family:sans-serif;padding:2em;max-width:600px;margin:0 auto;}
+    input{width:100%;padding:0.4em;font-size:1em;margin:0.5em 0;}
+    button{padding:0.5em 1.5em;font-size:1em;cursor:pointer;background:#4caf50;color:white;border:none;border-radius:4px;}
+    </style></head><body>
+    <h2>Authenticate with Google</h2>
+    <p><strong>Step 1:</strong> <a href="${url}" target="_blank">Click here to open Google sign-in</a></p>
+    <p><strong>Step 2:</strong> Sign in and approve access. Google will show you a code — copy it.</p>
+    <p><strong>Step 3:</strong> Paste the code below and click Submit.</p>
+    <input type="text" id="code" placeholder="Paste the code here..." />
+    <br/>
+    <button onclick="submitCode()">Submit Code</button>
+    <p id="msg"></p>
+    <script>
+      async function submitCode() {
+        const code = document.getElementById('code').value.trim();
+        if (!code) { document.getElementById('msg').textContent = 'Please paste the code first.'; return; }
+        const res = await fetch('/auth/google/submit', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
+        const data = await res.json();
+        if (data.success) {
+          document.getElementById('msg').textContent = 'Authentication successful! You can close this tab and return to the app.';
+          document.getElementById('msg').style.color = 'green';
+        } else {
+          document.getElementById('msg').textContent = 'Error: ' + data.error;
+          document.getElementById('msg').style.color = 'red';
+        }
+      }
+    </script>
+    </body></html>
+  `);
 });
 
-app.get('/auth/google/callback', async (req, res) => {
-  if (!oauth2Client) return res.status(500).send('OAuth client not initialised.');
-  const { code } = req.query;
+app.post('/auth/google/submit', async (req, res) => {
+  if (!oauth2Client) return res.status(500).json({ error: 'OAuth client not initialised.' });
+  const { code } = req.body;
   try {
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
     fs.writeFileSync(TOKENS_PATH, JSON.stringify(tokens));
     sheetsClient = google.sheets({ version: 'v4', auth: oauth2Client });
-    res.send('<h2>Authentication successful!</h2><p>You can close this tab and return to the app.</p>');
+    res.json({ success: true });
   } catch (e) {
-    res.status(500).send('Authentication failed: ' + e.message);
+    res.json({ success: false, error: e.message });
   }
 });
 
