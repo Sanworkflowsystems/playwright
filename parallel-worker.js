@@ -115,14 +115,18 @@ if (SHEET_MODE) {
 // Process a single job on a given page
 async function processJob(page, spec, batchId, allJobStates) {
   const { jobId, originalFilename } = spec;
-  const displayName = SHEET_MODE ? (spec.sheetName || spec.sheetId) : originalFilename;
+  let activeSheetName = spec.sheetName || null;
+  const displayName = SHEET_MODE ? (activeSheetName || spec.sheetId) : originalFilename;
   console.log(`[job:${jobId}] Starting processing of ${displayName}`);
 
   let rows, headers;
   try {
     if (SHEET_MODE) {
-      ({ rows, headers } = await sheetsHelper.readSheetData(sheetsClient, spec.sheetId, spec.sheetName));
-      await sheetsHelper.ensureProcessedColumn(sheetsClient, spec.sheetId, spec.sheetName, headers, rows.length);
+      if (!activeSheetName) {
+        activeSheetName = await sheetsHelper.getFirstSheetName(sheetsClient, spec.sheetId);
+      }
+      ({ rows, headers } = await sheetsHelper.readSheetData(sheetsClient, spec.sheetId, activeSheetName));
+      await sheetsHelper.ensureProcessedColumn(sheetsClient, spec.sheetId, activeSheetName, headers, rows.length);
       rows.forEach(row => { if (!row.hasOwnProperty('contactout_processed')) row['contactout_processed'] = '0'; });
     } else {
       ({ rows, headers } = await readCSV(spec.inputPath));
@@ -304,8 +308,8 @@ async function processJob(page, spec, batchId, allJobStates) {
     // Write results
     if (SHEET_MODE) {
       const sheetRowNumber = i + 2;
-      await sheetsHelper.updateSheetRow(sheetsClient, spec.sheetId, spec.sheetName, sheetRowNumber, headers, row);
-      await sheetsHelper.markRowProcessed(sheetsClient, spec.sheetId, spec.sheetName, sheetRowNumber, processedColLetter);
+      await sheetsHelper.updateSheetRow(sheetsClient, spec.sheetId, activeSheetName, sheetRowNumber, headers, row);
+      await sheetsHelper.markRowProcessed(sheetsClient, spec.sheetId, activeSheetName, sheetRowNumber, processedColLetter);
       console.log(`[job:${jobId}] Row ${i + 1} written to Google Sheet.`);
     } else {
       await csvWriter.writeRecords([row]);

@@ -20,7 +20,7 @@ if (!SHEET_MODE && (!inputPath || !outputPath)) {
 }
 
 const SHEET_ID   = process.env.SHEET_ID || '';
-const SHEET_NAME = process.env.SHEET_NAME || 'Sheet1';
+const SHEET_NAME = process.env.SHEET_NAME || '';
 
 const userDataDir = path.join(__dirname, 'playwright_profile'); // persistent profile
 if (!fs.existsSync(userDataDir)) fs.mkdirSync(userDataDir);
@@ -98,29 +98,26 @@ if (SHEET_MODE) {
   sheetsClient = google.sheets({ version: 'v4', auth: oauth2Client });
 }
 
-const {
-  readSheetData,
-  ensureProcessedColumn,
-  updateSheetRow,
-  markRowProcessed,
-  columnLetter
-} = SHEET_MODE ? require('./google-sheets-helper') : {};
+const sheetsHelper = SHEET_MODE ? require('./google-sheets-helper') : null;
 
 (async () => {
   let rows, headers;
+  let activeSheetName = SHEET_NAME;
 
   if (SHEET_MODE) {
-    console.log(`Reading data from Google Sheet: ${SHEET_ID} / ${SHEET_NAME}`);
-    ({ rows, headers } = await readSheetData(sheetsClient, SHEET_ID, SHEET_NAME));
-    await ensureProcessedColumn(sheetsClient, SHEET_ID, SHEET_NAME, headers, rows.length);
-    // Sync rows: add the processed column value to any rows that didn't have it
+    if (!activeSheetName) {
+      activeSheetName = await sheetsHelper.getFirstSheetName(sheetsClient, SHEET_ID);
+    }
+    console.log(`Reading data from Google Sheet: ${SHEET_ID} / ${activeSheetName}`);
+    ({ rows, headers } = await sheetsHelper.readSheetData(sheetsClient, SHEET_ID, activeSheetName));
+    await sheetsHelper.ensureProcessedColumn(sheetsClient, SHEET_ID, activeSheetName, headers, rows.length);
     rows.forEach(row => { if (!row.hasOwnProperty('contactout_processed')) row['contactout_processed'] = '0'; });
   } else {
     ({ rows, headers } = await readCSV(inputPath));
   }
 
   const processedColIndex = headers.indexOf('contactout_processed');
-  const processedColLetter = processedColIndex >= 0 ? columnLetter(processedColIndex) : null;
+  const processedColLetter = processedColIndex >= 0 ? sheetsHelper.columnLetter(processedColIndex) : null;
 
   const browserContextOptions = {
     viewport: { width: 1280, height: 800 },
@@ -331,8 +328,8 @@ const {
     // Write results
     if (SHEET_MODE) {
       const sheetRowNumber = i + 2; // header = row 1, first data = row 2
-      await updateSheetRow(sheetsClient, SHEET_ID, SHEET_NAME, sheetRowNumber, headers, row);
-      await markRowProcessed(sheetsClient, SHEET_ID, SHEET_NAME, sheetRowNumber, processedColLetter);
+      await sheetsHelper.updateSheetRow(sheetsClient, SHEET_ID, activeSheetName, sheetRowNumber, headers, row);
+      await sheetsHelper.markRowProcessed(sheetsClient, SHEET_ID, activeSheetName, sheetRowNumber, processedColLetter);
       console.log(`Row ${i + 1} written to Google Sheet.`);
     } else {
       await csvWriter.writeRecords([row]);

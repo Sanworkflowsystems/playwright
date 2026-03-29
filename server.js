@@ -447,7 +447,7 @@ async function runQueue() {
     }
   }
   anyWorkerRunning = false;
-  runBatchQueue();
+  if (batchQueue.length > 0) setTimeout(runBatchQueue, 0);
 }
 
 function runWorker(job) {
@@ -504,7 +504,7 @@ async function runBatchQueue() {
     }
   }
   anyWorkerRunning = false;
-  runQueue();
+  if (queue.length > 0) setTimeout(runQueue, 0);
 }
 
 function runBatchWorker(batch) {

@@ -12,6 +12,11 @@ function columnLetter(zeroBasedIndex) {
   return letter;
 }
 
+async function getFirstSheetName(sheets, sheetId) {
+  const response = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
+  return response.data.sheets[0].properties.title;
+}
+
 async function readSheetData(sheets, sheetId, sheetName) {
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
@@ -80,6 +85,7 @@ async function markRowProcessed(sheets, sheetId, sheetName, rowNumber, processed
 
 module.exports = {
   columnLetter,
+  getFirstSheetName,
   readSheetData,
   ensureProcessedColumn,
   updateSheetRow,
