@@ -42,7 +42,7 @@ const personalEmailDomains = [
 function randBetween(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
 function getDynamicWaitTime() {
-  return randBetween(8000, 12000); // 8-12 seconds
+  return randBetween(5000, 8000); // 5-8 seconds
 }
 
 // New function to wait for a file signal from the UI
@@ -132,10 +132,19 @@ function writeProgress(jobId, progress, total) {
 
     try {
       if (i > 0) {
-        const removeTagSelector = "div.contactout-select__multi-value__remove";
-        const removeTagButton = page.locator(removeTagSelector);
-        if (await removeTagButton.isVisible({ timeout: 1000 }).catch(() => false)) {
-            await removeTagButton.click();
+        // Clear ALL company tags — use the clear-all X button if present,
+        // otherwise loop and remove individual tags one by one
+        const clearAllButton = page.locator('div.contactout-select__clear-indicator');
+        if (await clearAllButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+          await clearAllButton.click();
+          await page.waitForTimeout(randBetween(150, 300));
+        } else {
+          // Fallback: remove tags one by one until none remain
+          let removeBtn = page.locator('div.contactout-select__multi-value__remove').first();
+          while (await removeBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+            await removeBtn.click();
+            await page.waitForTimeout(150);
+          }
         }
         const nameInput = page.locator(NAME_INPUT_SELECTOR);
         const nameValue = await nameInput.inputValue();
@@ -186,21 +195,21 @@ function writeProgress(jobId, progress, total) {
         page.click(SUBMIT_BUTTON_SELECTOR)
       ]);
 
-      await page.waitForTimeout(randBetween(3000, 5000)); // Wait for results to load
+      await page.waitForTimeout(randBetween(4000, 7000)); // Wait for results to load
 
       console.log('Searching for "View email" buttons...');
       const viewEmailButtons = await page.locator('button:has-text("View email")').all();
       console.log(`Found ${viewEmailButtons.length} "View email" buttons.`);
 
-      for (const button of viewEmailButtons) {
+      if (viewEmailButtons.length > 0) {
         try {
-          if (await button.isVisible()) {
-            await button.click({timeout: 5000});
-            console.log('Clicked a "View email" button.');
-            await page.waitForTimeout(randBetween(500, 1000)); // Stagger clicks to allow UI to update
+          if (await viewEmailButtons[0].isVisible()) {
+            await viewEmailButtons[0].click({timeout: 5000});
+            console.log('Clicked the first "View email" button.');
+            await page.waitForTimeout(randBetween(2300, 2600));
           }
         } catch (clickErr) {
-            console.log("Could not click a 'View email' button, it might have disappeared or was not clickable.");
+            console.log("Could not click the 'View email' button, it might have disappeared or was not clickable.");
         }
       }
       
@@ -208,19 +217,19 @@ function writeProgress(jobId, progress, total) {
       const findPhoneButtons = await page.locator('button.w-\\[79px\\].h-5.rounded-md.text-\\[12px\\].leading-\\[18px\\].font-semibold.bg-\\[\\#F0EEFF\\].ml-3.reveal-btn.css-1oga2ar:has-text("Find phone")').all();
       console.log(`Found ${findPhoneButtons.length} "Find phone" buttons.`);
 
-      for (const button of findPhoneButtons) {
+      if (findPhoneButtons.length > 0) {
         try {
-          if (await button.isVisible()) {
-            await button.click({timeout: 5000});
-            console.log('Clicked a "Find phone" button.');
-            await page.waitForTimeout(randBetween(500, 1000)); // Stagger clicks to allow UI to update
+          if (await findPhoneButtons[0].isVisible()) {
+            await findPhoneButtons[0].click({timeout: 5000});
+            console.log('Clicked the first "Find phone" button.');
+            await page.waitForTimeout(randBetween(2300, 2600));
           }
         } catch (clickErr) {
-            console.log("Could not click a 'Find phone' button, it might have disappeared or was not clickable.");
+            console.log("Could not click the 'Find phone' button, it might have disappeared or was not clickable.");
         }
       }
-      
-      await page.waitForTimeout(4000); // Final wait for all content to be revealed
+
+      await page.waitForTimeout(5000); // Final wait for all content to be revealed
 
       let extractedEmails = [];
       let extractedPhones = [];

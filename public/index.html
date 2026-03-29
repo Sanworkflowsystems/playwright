@@ -1,33 +1,141 @@
 <!doctype html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <title>Enrich Upload</title>
-    <style>
-        body { font-family: sans-serif; line-height: 1.6; padding: 2em; }
-        #statusArea { margin-top: 2em; padding: 1em; border: 1px solid #ccc; border-radius: 5px; }
-        #progressBarContainer { width: 100%; background-color: #f3f3f3; border-radius: 5px; margin-top: 0.5em; }
-        #progressBar { width: 0%; height: 20px; background-color: #4caf50; border-radius: 5px; text-align: center; line-height: 20px; color: white; }
-        #downloadLink { display: none; margin-top: 1em; font-weight: bold; }
-    </style>
+  <meta charset="utf-8">
+  <title>ContactOut Batch Enrichment</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { font-family: sans-serif; line-height: 1.6; padding: 2em; max-width: 960px; margin: 0 auto; }
+    h2 { margin-bottom: 0.5em; }
+
+    /* Upload section */
+    #uploadSection {}
+    .slot-row { display: flex; align-items: center; gap: 0.75em; margin-bottom: 0.6em; }
+    .slot-label { min-width: 60px; font-weight: bold; }
+    .slot-filename { color: #555; font-size: 0.9em; font-style: italic; }
+    .optional-badge { font-size: 0.75em; color: #888; margin-left: 0.3em; }
+    #uploadOptions { margin-top: 1.2em; }
+    #uploadOptions label { display: block; margin-bottom: 0.4em; }
+    textarea { width: 100%; max-width: 500px; }
+    #uploadBtn { margin-top: 1em; padding: 0.5em 1.5em; font-size: 1em; cursor: pointer; }
+
+    /* Dashboard section */
+    #dashboardSection { display: none; }
+    #batchControls { margin-bottom: 1em; display: flex; gap: 1em; align-items: center; flex-wrap: wrap; }
+    #startBatchBtn { padding: 0.5em 1.2em; background: #4caf50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; display: none; }
+    #startBatchBtn:disabled { background: #aaa; cursor: default; }
+    #stopBatchBtn { padding: 0.5em 1.2em; background: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; display: none; }
+    #stopBatchBtn:disabled { background: #aaa; cursor: default; }
+
+    .panels-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1em; }
+
+    .job-panel { border: 1px solid #ccc; border-radius: 6px; padding: 1em; display: none; }
+    .job-panel.visible { display: block; }
+    .panel-filename { font-weight: bold; margin-bottom: 0.3em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .panel-status { font-size: 0.9em; color: #444; margin-bottom: 0.5em; }
+    .progress-container { width: 100%; background: #f3f3f3; border-radius: 4px; height: 18px; overflow: hidden; }
+    .progress-bar { height: 100%; width: 0%; background: #4caf50; border-radius: 4px; text-align: center; font-size: 0.75em; line-height: 18px; color: white; transition: width 0.4s; white-space: nowrap; }
+    .panel-download { display: none; margin-top: 0.6em; font-size: 0.9em; font-weight: bold; color: #1976d2; }
+    .panel-download:hover { text-decoration: underline; }
+  </style>
 </head>
 <body>
-  <h2>Upload CSV to Enrich</h2>
-  <form id="uploadForm">
-    <input type="file" id="file" name="file" accept=".csv" required /><br/><br/>
-    <label>Manual login?<input type="checkbox" id="manualLogin" checked /></label><br/><br/>
-    <label>Cookies (optional):</label><br/>
-    <textarea id="cookies" placeholder="cookie1=val; cookie2=val" rows="3" cols="60"></textarea><br/><br/>
-    <button type="submit">Upload & Start</button>
-  </form>
 
-  <div id="statusArea" style="display: none;">
-      <p id="statusText"></p>
-      <div id="progressBarContainer">
-          <div id="progressBar"></div>
+  <!-- Phase 1: Upload -->
+  <div id="uploadSection">
+    <h2>ContactOut Batch Enrichment</h2>
+    <p>Upload up to 5 CSV files. Each file will be processed in a separate browser tab simultaneously.</p>
+
+    <div id="slots">
+      <div class="slot-row" data-slot="0">
+        <span class="slot-label">Slot 1</span>
+        <input type="file" accept=".csv" class="slot-file-input" />
+        <span class="slot-filename"></span>
       </div>
-      <button id="startJobButton" style="display: none; margin-top: 1em;">I've logged in, Start Processing</button>
-      <a id="downloadLink" href="#">Download Enriched CSV</a>
+      <div class="slot-row" data-slot="1">
+        <span class="slot-label">Slot 2 <span class="optional-badge">(optional)</span></span>
+        <input type="file" accept=".csv" class="slot-file-input" />
+        <span class="slot-filename"></span>
+      </div>
+      <div class="slot-row" data-slot="2">
+        <span class="slot-label">Slot 3 <span class="optional-badge">(optional)</span></span>
+        <input type="file" accept=".csv" class="slot-file-input" />
+        <span class="slot-filename"></span>
+      </div>
+      <div class="slot-row" data-slot="3">
+        <span class="slot-label">Slot 4 <span class="optional-badge">(optional)</span></span>
+        <input type="file" accept=".csv" class="slot-file-input" />
+        <span class="slot-filename"></span>
+      </div>
+      <div class="slot-row" data-slot="4">
+        <span class="slot-label">Slot 5 <span class="optional-badge">(optional)</span></span>
+        <input type="file" accept=".csv" class="slot-file-input" />
+        <span class="slot-filename"></span>
+      </div>
+    </div>
+
+    <div id="uploadOptions">
+      <label>
+        <input type="checkbox" id="manualLogin" checked />
+        Manual login (browser will open — log in before clicking Start)
+      </label>
+      <label>Cookies (optional):</label>
+      <textarea id="cookies" placeholder="cookie1=val; cookie2=val" rows="3"></textarea>
+    </div>
+
+    <button id="uploadBtn">Upload Files &amp; Open Browser</button>
+  </div>
+
+  <!-- Phase 2: Batch Dashboard -->
+  <div id="dashboardSection">
+    <h2>Batch Status Dashboard</h2>
+    <div id="batchControls">
+      <button id="startBatchBtn">I've logged in — Start Processing All Tabs</button>
+      <button id="stopBatchBtn">Stop All Jobs</button>
+      <span id="batchStatusText"></span>
+    </div>
+    <div class="panels-grid" id="panelsGrid">
+      <div class="job-panel" id="panel-0">
+        <div class="panel-filename" id="filename-0"></div>
+        <div class="panel-status" id="status-0">Queued</div>
+        <div class="progress-container">
+          <div class="progress-bar" id="bar-0">0%</div>
+        </div>
+        <a class="panel-download" id="download-0" href="#" target="_blank">Download Enriched CSV</a>
+      </div>
+      <div class="job-panel" id="panel-1">
+        <div class="panel-filename" id="filename-1"></div>
+        <div class="panel-status" id="status-1">Queued</div>
+        <div class="progress-container">
+          <div class="progress-bar" id="bar-1">0%</div>
+        </div>
+        <a class="panel-download" id="download-1" href="#" target="_blank">Download Enriched CSV</a>
+      </div>
+      <div class="job-panel" id="panel-2">
+        <div class="panel-filename" id="filename-2"></div>
+        <div class="panel-status" id="status-2">Queued</div>
+        <div class="progress-container">
+          <div class="progress-bar" id="bar-2">0%</div>
+        </div>
+        <a class="panel-download" id="download-2" href="#" target="_blank">Download Enriched CSV</a>
+      </div>
+      <div class="job-panel" id="panel-3">
+        <div class="panel-filename" id="filename-3"></div>
+        <div class="panel-status" id="status-3">Queued</div>
+        <div class="progress-container">
+          <div class="progress-bar" id="bar-3">0%</div>
+        </div>
+        <a class="panel-download" id="download-3" href="#" target="_blank">Download Enriched CSV</a>
+      </div>
+      <div class="job-panel" id="panel-4">
+        <div class="panel-filename" id="filename-4"></div>
+        <div class="panel-status" id="status-4">Queued</div>
+        <div class="progress-container">
+          <div class="progress-bar" id="bar-4">0%</div>
+        </div>
+        <a class="panel-download" id="download-4" href="#" target="_blank">Download Enriched CSV</a>
+      </div>
+    </div>
   </div>
 
   <script src="app.js"></script>

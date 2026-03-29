@@ -32,19 +32,32 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const upload = multer({ dest: UPLOAD_DIR });
 
-// Simple in-memory job store
+// Build output filename: "originalname_enriched.csv"
+function enrichedFilename(originalname, jobId) {
+  const ext = path.extname(originalname);          // ".csv"
+  const base = path.basename(originalname, ext);   // "leads"
+  return `${base}_enriched${ext}`;                 // "leads_enriched.csv"
+}
+
+// In-memory stores
 const jobs = {};
 const queue = [];
+const batches = {};
+const batchQueue = [];
 
-// POST /upload -> accepts a CSV, returns job id
+// Unified mutex: only one worker process at a time (both worker.js and parallel-worker.js
+// open the same playwright_profile/ — running both simultaneously causes a file lock conflict)
+let anyWorkerRunning = false;
+
+// ---- Single-file endpoints (backward compat) ----
+
 app.post('/upload', upload.single('file'), (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).send('No file uploaded.');
 
-  // Accept session options from user, selectors are now hardcoded
   const { cookies, manual_login } = req.body;
   const jobId = uuidv4();
-  const outputPath = path.join(__dirname, 'outputs', `${jobId}.csv`);
+  const outputPath = path.join(__dirname, 'outputs', enrichedFilename(file.originalname, jobId));
   const statusPath = path.join(__dirname, 'outputs', `${jobId}.json`);
 
   jobs[jobId] = {
@@ -56,11 +69,10 @@ app.post('/upload', upload.single('file'), (req, res) => {
     createdAt: new Date().toISOString(),
     progress: 0,
     total: 0,
-    details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS }
+    details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS, originalFilename: file.originalname }
   };
   queue.push(jobId);
   res.json({ jobId });
-  // kick worker if not running
   runQueue();
 });
 
@@ -70,13 +82,12 @@ app.get('/status/:jobId', (req, res) => {
 
   let progressData = {};
   if (fs.existsSync(j.statusPath)) {
-      try {
-        progressData = JSON.parse(fs.readFileSync(j.statusPath, 'utf8'));
-      } catch (e) {
-        console.error("Error reading status file: ", e);
-      }
+    try {
+      progressData = JSON.parse(fs.readFileSync(j.statusPath, 'utf8'));
+    } catch (e) {
+      console.error('Error reading status file:', e);
+    }
   }
-  
   res.json({ ...j, ...progressData });
 });
 
@@ -84,74 +95,268 @@ app.get('/download/:jobId', (req, res) => {
   const j = jobs[req.params.jobId];
   if (!j) return res.status(404).send('Not found');
 
-  // Allow download if job is finished or has errored out, as partial data may exist.
-  if (j.status === 'queued' || j.status === 'running') {
-    return res.status(400).send('Job is still in progress.');
-  }
-  
   if (!fs.existsSync(j.outputPath)) {
-      return res.status(404).send('Output file not found. It may have been cleaned up or the job may have failed before any data was written.');
+    return res.status(404).send('Output file not found. It may not have been created yet, or the job failed before any data was written.');
   }
-  
-  // Provide the original uploaded filename for the download
+
   const originalFilename = (j.details && j.details.originalFilename) ? j.details.originalFilename : `${j.id}.csv`;
-  res.download(j.outputPath, `enriched_${originalFilename}`);
+  res.download(j.outputPath, enrichedFilename(originalFilename, j.id));
 });
 
-// Endpoint to create the start signal for the worker
 app.post('/signal-start/:jobId', (req, res) => {
-    const job = jobs[req.params.jobId];
-    if (!job) {
-        return res.status(404).send('Job not found.');
-    }
-    const signalPath = path.join(__dirname, 'outputs', `${req.params.jobId}.start`);
-    fs.writeFileSync(signalPath, ''); // Create the empty signal file
-    res.status(200).send('Start signal sent.');
+  const job = jobs[req.params.jobId];
+  if (!job) return res.status(404).send('Job not found.');
+  const signalPath = path.join(__dirname, 'outputs', `${req.params.jobId}.start`);
+  fs.writeFileSync(signalPath, '');
+  res.status(200).send('Start signal sent.');
 });
 
-// Simple singleton worker spawn
-let workerRunning = false;
+app.post('/stop/:jobId', (req, res) => {
+  const job = jobs[req.params.jobId];
+  if (!job) return res.status(404).send('Job not found.');
+
+  if (job.status !== 'running' || !job.process) {
+    return res.status(400).send('Job is not currently running or has no process handle.');
+  }
+
+  console.log(`Sending stop signal to job ${job.id}...`);
+  job.process.kill('SIGTERM');
+  res.status(200).send('Job stop signal sent.');
+});
+
+// ---- Batch endpoints ----
+
+app.post('/upload-batch', upload.array('files', 5), (req, res) => {
+  const files = req.files;
+  if (!files || files.length === 0) return res.status(400).send('No files uploaded.');
+
+  const { cookies, manual_login } = req.body;
+  const batchId = uuidv4();
+  const jobSpecsList = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const jobId = uuidv4();
+    const outputPath = path.join(__dirname, 'outputs', enrichedFilename(file.originalname, jobId));
+    const statusPath = path.join(__dirname, 'outputs', `${jobId}.json`);
+
+    const spec = {
+      jobId,
+      slotIndex: i,
+      inputPath: file.path,
+      outputPath,
+      statusPath,
+      originalFilename: file.originalname
+    };
+    jobSpecsList.push(spec);
+
+    // Register in jobs map so /download/:jobId works
+    jobs[jobId] = {
+      id: jobId,
+      status: 'queued',
+      inputPath: file.path,
+      outputPath,
+      statusPath,
+      createdAt: new Date().toISOString(),
+      progress: 0,
+      total: 0,
+      details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS, originalFilename: file.originalname }
+    };
+
+    // Write initial status file
+    fs.writeFileSync(statusPath, JSON.stringify({ status: 'queued', progress: 0, total: 0 }));
+  }
+
+  const batch = {
+    batchId,
+    status: 'queued',
+    jobSpecs: jobSpecsList,
+    details: { cookies, manual_login: manual_login === 'true' },
+    createdAt: new Date().toISOString(),
+    process: null
+  };
+  batches[batchId] = batch;
+  batchQueue.push(batchId);
+
+  // Write initial batch status
+  const batchStatusPath = path.join(__dirname, 'outputs', `${batchId}.json`);
+  const initialJobs = jobSpecsList.map(s => ({
+    jobId: s.jobId,
+    slotIndex: s.slotIndex,
+    originalFilename: s.originalFilename,
+    status: 'queued',
+    progress: 0,
+    total: 0
+  }));
+  fs.writeFileSync(batchStatusPath, JSON.stringify({ batchId, status: 'queued', jobs: initialJobs }));
+
+  res.json({ batchId, jobSpecs: jobSpecsList });
+  runBatchQueue();
+});
+
+app.get('/batch-status/:batchId', (req, res) => {
+  const batch = batches[req.params.batchId];
+  if (!batch) return res.status(404).send('Batch not found');
+
+  const batchStatusPath = path.join(__dirname, 'outputs', `${req.params.batchId}.json`);
+  let batchData = { batchId: req.params.batchId, status: batch.status, jobs: [] };
+
+  if (fs.existsSync(batchStatusPath)) {
+    try {
+      batchData = JSON.parse(fs.readFileSync(batchStatusPath, 'utf8'));
+    } catch (e) {
+      console.error('Error reading batch status file:', e);
+    }
+  }
+
+  // Merge per-slot status from individual job files for freshest data
+  const mergedJobs = batch.jobSpecs.map(spec => {
+    let slotData = { jobId: spec.jobId, slotIndex: spec.slotIndex, originalFilename: spec.originalFilename, status: 'queued', progress: 0, total: 0 };
+    if (fs.existsSync(spec.statusPath)) {
+      try {
+        const slotFile = JSON.parse(fs.readFileSync(spec.statusPath, 'utf8'));
+        slotData = { ...slotData, ...slotFile };
+      } catch (e) { /* use defaults */ }
+    }
+    return slotData;
+  });
+
+  res.json({ ...batchData, jobs: mergedJobs });
+});
+
+app.post('/signal-start-batch/:batchId', (req, res) => {
+  const batch = batches[req.params.batchId];
+  if (!batch) return res.status(404).send('Batch not found.');
+  const signalPath = path.join(__dirname, 'outputs', `${req.params.batchId}.start`);
+  fs.writeFileSync(signalPath, '');
+  res.status(200).send('Batch start signal sent.');
+});
+
+app.post('/stop-batch/:batchId', (req, res) => {
+  const batch = batches[req.params.batchId];
+  if (!batch) return res.status(404).send('Batch not found.');
+
+  if (!batch.process) {
+    return res.status(400).send('Batch is not currently running or has no process handle.');
+  }
+
+  console.log(`Sending stop signal to batch ${batch.batchId}...`);
+  batch.process.kill('SIGTERM');
+  res.status(200).send('Batch stop signal sent.');
+});
+
+// ---- Single-job queue runner ----
+
 async function runQueue() {
-  if (workerRunning) return;
-  workerRunning = true;
+  if (anyWorkerRunning) return;
+  anyWorkerRunning = true;
   while (queue.length > 0) {
     const jobId = queue.shift();
     const job = jobs[jobId];
     if (!job) continue;
     job.status = 'running';
     try {
-      // call worker.js with job info
       await runWorker(job);
       job.status = 'finished';
-      // Write final status
       const statusPayload = { progress: job.total, total: job.total, status: 'finished' };
       fs.writeFileSync(job.statusPath, JSON.stringify(statusPayload));
     } catch (e) {
       console.error('Worker failed', e);
       job.status = 'error';
       job.error = e.message;
-       // Write error status
       const statusPayload = { status: 'error', error: e.message };
       fs.writeFileSync(job.statusPath, JSON.stringify(statusPayload));
     }
   }
-  workerRunning = false;
+  anyWorkerRunning = false;
+  // Check if batch queue has work now
+  runBatchQueue();
 }
 
-// wrapper to spawn worker.js
 function runWorker(job) {
   return new Promise((resolve, reject) => {
     const args = [job.id, job.inputPath, job.outputPath];
-    // pass options via env or args
-    const env = Object.assign({}, process.env, { JOB_SELECTORS: JSON.stringify(job.details.selectors), JOB_COOKIES: job.details.cookies || '', JOB_MANUAL: job.details.manual_login ? '1' : '0' });
+    const env = Object.assign({}, process.env, {
+      JOB_SELECTORS: JSON.stringify(job.details.selectors),
+      JOB_COOKIES: job.details.cookies || '',
+      JOB_MANUAL: job.details.manual_login ? '1' : '0'
+    });
     const child = spawn('node', ['worker.js', ...args], { stdio: 'inherit', env });
-    child.on('exit', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error('Worker exited with ' + code));
+    job.process = child;
+
+    child.on('exit', (code, signal) => {
+      job.process = null;
+      if (signal === 'SIGTERM') {
+        console.log(`Job ${job.id} was stopped intentionally.`);
+        job.status = 'stopped';
+        try {
+          const statusPayload = { ...JSON.parse(fs.readFileSync(job.statusPath, 'utf8')), status: 'stopped' };
+          fs.writeFileSync(job.statusPath, JSON.stringify(statusPayload));
+        } catch (e) {
+          fs.writeFileSync(job.statusPath, JSON.stringify({ status: 'stopped' }));
+        }
+        resolve();
+      } else if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error('Worker exited with code ' + code));
+      }
+    });
+  });
+}
+
+// ---- Batch queue runner ----
+
+async function runBatchQueue() {
+  if (anyWorkerRunning) return;
+  anyWorkerRunning = true;
+  while (batchQueue.length > 0) {
+    const batchId = batchQueue.shift();
+    const batch = batches[batchId];
+    if (!batch) continue;
+    batch.status = 'running';
+    // Update each job's status to 'running' in memory
+    for (const spec of batch.jobSpecs) {
+      if (jobs[spec.jobId]) jobs[spec.jobId].status = 'running';
+    }
+    try {
+      await runBatchWorker(batch);
+      batch.status = 'finished';
+    } catch (e) {
+      console.error('Batch worker failed', e);
+      batch.status = 'error';
+    }
+  }
+  anyWorkerRunning = false;
+  // Check if single queue has work now
+  runQueue();
+}
+
+function runBatchWorker(batch) {
+  return new Promise((resolve, reject) => {
+    const env = Object.assign({}, process.env, {
+      BATCH_JOBS: JSON.stringify(batch.jobSpecs),
+      JOB_SELECTORS: JSON.stringify(HARDCODED_SELECTORS),
+      JOB_COOKIES: batch.details.cookies || '',
+      JOB_MANUAL: batch.details.manual_login ? '1' : '0'
+    });
+    const child = spawn('node', ['parallel-worker.js', batch.batchId], { stdio: 'inherit', env });
+    batch.process = child;
+
+    child.on('exit', (code, signal) => {
+      batch.process = null;
+      if (signal === 'SIGTERM') {
+        console.log(`Batch ${batch.batchId} was stopped intentionally.`);
+        batch.status = 'stopped';
+        resolve();
+      } else if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error('Batch worker exited with code ' + code));
+      }
     });
   });
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server listening ${PORT}`));
-
