@@ -160,7 +160,7 @@ app.post('/start-sheet-batch', async (req, res) => {
   const jobSpecsList = [];
 
   for (let i = 0; i < sheetJobs.length; i++) {
-    const { sheetUrl, sheetName = 'Sheet1' } = sheetJobs[i];
+    const { sheetUrl, sheetName = '' } = sheetJobs[i];
     let sheetId;
     try { sheetId = extractSheetId(sheetUrl); }
     catch (e) { return res.status(400).json({ error: `Slot ${i + 1}: ${e.message}` }); }

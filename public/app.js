@@ -107,7 +107,7 @@ document.getElementById('uploadBtn').addEventListener('click', async () => {
     const sheetJobs = [];
     document.querySelectorAll('#sheetSlots .sheet-slot-row').forEach(row => {
       const url = row.querySelector('.sheet-url-input').value.trim();
-      const tabName = row.querySelector('.sheet-tab-input').value.trim() || 'Sheet1';
+      const tabName = row.querySelector('.sheet-tab-input').value.trim() || '';
       if (url) sheetJobs.push({ sheetUrl: url, sheetName: tabName });
     });
 
