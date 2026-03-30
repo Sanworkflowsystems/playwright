@@ -165,7 +165,15 @@ const sheetsHelper = SHEET_MODE ? require('./google-sheets-helper') : null;
     csvWriter = createCsvWriter({ path: outputPath, header: outputHeaders });
   }
 
+  const ROW_LIMIT = 400;
+  let processedCount = 0;
+
   for (let i = 0; i < rows.length; i++) {
+    if (processedCount >= ROW_LIMIT) {
+      console.log(`Row limit of ${ROW_LIMIT} reached. Stopping.`);
+      break;
+    }
+
     const row = rows[i];
 
     // Skip already-processed rows instantly (sheet mode)
@@ -335,6 +343,7 @@ const sheetsHelper = SHEET_MODE ? require('./google-sheets-helper') : null;
       await csvWriter.writeRecords([row]);
     }
 
+    processedCount++;
     const wait = getDynamicWaitTime();
     console.log(`Waiting ${Math.round(wait / 1000)}s before next`);
     await page.waitForTimeout(wait);

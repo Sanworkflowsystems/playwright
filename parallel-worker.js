@@ -147,6 +147,9 @@ async function processJob(page, spec, batchId, allJobStates) {
   writeJobProgress(spec, 'running', 0, rows.length);
   writeBatchProgress(batchId, allJobStates);
 
+  const ROW_LIMIT = 400;
+  let processedCount = 0;
+
   let csvWriter = null;
   if (!SHEET_MODE) {
     const outputHeaders = headers.map(h => ({ id: h, title: h }));
@@ -156,6 +159,11 @@ async function processJob(page, spec, batchId, allJobStates) {
   for (let i = 0; i < rows.length; i++) {
     if (allJobStates[jobId].status === 'stopped') {
       console.log(`[job:${jobId}] Job was stopped at row ${i}.`);
+      break;
+    }
+
+    if (processedCount >= ROW_LIMIT) {
+      console.log(`[job:${jobId}] Row limit of ${ROW_LIMIT} reached. Stopping.`);
       break;
     }
 
@@ -315,6 +323,7 @@ async function processJob(page, spec, batchId, allJobStates) {
       await csvWriter.writeRecords([row]);
     }
 
+    processedCount++;
     const wait = getDynamicWaitTime();
     console.log(`[job:${jobId}] Waiting ${Math.round(wait / 1000)}s before next row`);
     await page.waitForTimeout(wait);
