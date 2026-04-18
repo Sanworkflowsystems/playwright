@@ -83,6 +83,66 @@ async function markRowProcessed(sheets, sheetId, sheetName, rowNumber, processed
   });
 }
 
+// ── Pipeline column helpers ───────────────────────────────────────────────────
+
+const PIPELINE_COLUMNS = ['enrichment_email', 'enrichment_source', 'enrichment_status'];
+
+/**
+ * Ensure the three pipeline output columns exist in the sheet header row.
+ * Adds any missing ones to the right of existing columns, fills data rows with ''.
+ */
+async function ensurePipelineColumns(sheets, sheetId, sheetName, headers, totalDataRows) {
+  const missing = PIPELINE_COLUMNS.filter(col => !headers.includes(col));
+  if (missing.length === 0) return;
+
+  for (const col of missing) {
+    const colIndex  = headers.length;
+    const colLetter = columnLetter(colIndex);
+
+    // Write header
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `${sheetName}!${colLetter}1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [[col]] },
+    });
+
+    // Fill data rows with empty string so the column exists
+    if (totalDataRows > 0) {
+      const empty = Array.from({ length: totalDataRows }, () => ['']);
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: sheetId,
+        range: `${sheetName}!${colLetter}2:${colLetter}${totalDataRows + 1}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: empty },
+      });
+    }
+
+    headers.push(col);
+  }
+}
+
+/**
+ * Write pipeline result columns for a single row.
+ * Only updates the three pipeline columns (enrichment_email, enrichment_source, enrichment_status).
+ * rowNumber is 1-indexed (2 = first data row).
+ */
+async function updatePipelineResult(sheets, sheetId, sheetName, rowNumber, headers, rowData) {
+  const updates = PIPELINE_COLUMNS.map(col => {
+    const colIndex  = headers.indexOf(col);
+    if (colIndex === -1) return null;
+    const colLetter = columnLetter(colIndex);
+    return sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `${sheetName}!${colLetter}${rowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [[rowData[col] !== undefined ? rowData[col] : '']] },
+    });
+  }).filter(Boolean);
+
+  await Promise.allSettled(updates);
+}
+
 module.exports = {
   columnLetter,
   getFirstSheetName,
@@ -90,4 +150,6 @@ module.exports = {
   ensureProcessedColumn,
   updateSheetRow,
   markRowProcessed,
+  ensurePipelineColumns,
+  updatePipelineResult,
 };

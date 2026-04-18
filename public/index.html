@@ -76,6 +76,50 @@
     #verifySubmitBtn { margin-left: 0.8em; padding: 0.4em 1.2em; background: #7c3aed; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 1em; }
     #verifySubmitBtn:hover { background: #6d28d9; }
     #verifyMsg { margin-top: 0.5em; font-size: 0.85em; color: #555; }
+
+    /* ── Pipeline styles ── */
+    #pipelineToggleRow { margin: 1em 0 0.4em 0; }
+    #pipelineToggleRow label { display: flex; align-items: center; gap: 0.5em; font-size: 1em; font-weight: bold; cursor: pointer; }
+    #pipelineToggleRow input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; }
+
+    #pipelinePanel { display: none; margin: 0.8em 0 1em 0; padding: 1em 1.2em; background: #f0f7ff; border: 1px solid #90caf9; border-radius: 8px; }
+    #pipelinePanel h3 { margin: 0 0 0.8em 0; font-size: 1em; color: #1565c0; }
+    .pipeline-section { margin-bottom: 1em; }
+    .pipeline-section label { display: block; font-size: 0.9em; font-weight: bold; margin-bottom: 0.3em; color: #333; }
+    .pipeline-section textarea { width: 100%; max-width: 420px; height: 72px; font-family: monospace; font-size: 0.85em; padding: 0.4em; border: 1px solid #bbb; border-radius: 4px; resize: vertical; }
+    .pipeline-section input[type=text] { width: 100%; max-width: 420px; padding: 0.35em 0.5em; font-family: monospace; font-size: 0.9em; border: 1px solid #bbb; border-radius: 4px; }
+    .pipeline-hint { font-size: 0.78em; color: #666; margin-top: 0.2em; }
+    #savePipelineKeysBtn { padding: 0.4em 1.2em; background: #1565c0; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9em; margin-top: 0.5em; }
+    #savePipelineKeysBtn:hover { background: #0d47a1; }
+    #saveKeysMsg { font-size: 0.85em; margin-left: 0.8em; }
+
+    /* Pipeline dashboard */
+    #pipelineDashboard { display: none; margin-bottom: 1.5em; padding: 1em 1.2em; background: #f8fff8; border: 1px solid #a5d6a7; border-radius: 8px; }
+    #pipelineDashboard h3 { margin: 0 0 0.8em 0; font-size: 1em; color: #2e7d32; }
+    #pipelinePhaseLabel { font-weight: bold; color: #333; margin-bottom: 0.5em; font-size: 0.95em; }
+    .pipeline-progress-wrap { width: 100%; background: #e0e0e0; border-radius: 6px; height: 22px; overflow: hidden; margin-bottom: 0.6em; }
+    #pipelineProgressBar { height: 100%; width: 0%; background: #43a047; border-radius: 6px; text-align: center; font-size: 0.8em; line-height: 22px; color: white; transition: width 0.4s; white-space: nowrap; }
+    #pipelineStats { display: flex; flex-wrap: wrap; gap: 0.6em 1.4em; font-size: 0.88em; margin-bottom: 0.6em; }
+    .pstat { display: flex; flex-direction: column; }
+    .pstat-label { font-size: 0.75em; color: #666; }
+    .pstat-value { font-weight: bold; font-size: 1.05em; }
+    .pstat-value.green  { color: #2e7d32; }
+    .pstat-value.blue   { color: #1565c0; }
+    .pstat-value.orange { color: #e65100; }
+    .pstat-value.red    { color: #c62828; }
+
+    #keyHealthRow { display: flex; gap: 1em; font-size: 0.82em; margin-bottom: 0.8em; flex-wrap: wrap; }
+    .key-health { display: flex; align-items: center; gap: 0.3em; }
+    .key-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .key-dot.green  { background: #43a047; }
+    .key-dot.yellow { background: #fb8c00; }
+    .key-dot.red    { background: #e53935; }
+
+    #pipelineControls { display: flex; gap: 0.8em; align-items: center; flex-wrap: wrap; }
+    #stopPipelineBtn { padding: 0.4em 1.1em; background: #e53935; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
+    #continueToCOBtn { display: none; padding: 0.5em 1.4em; background: #1565c0; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; font-weight: bold; }
+    #continueToCOBtn:hover { background: #0d47a1; }
+    #pipelineStatusText { font-size: 0.9em; color: #555; }
   </style>
 </head>
 <body>
@@ -88,6 +132,48 @@
     <div id="modeSelector">
       <label><input type="radio" name="mode" value="csv" checked /> Upload CSV files</label>
       <label><input type="radio" name="mode" value="sheets" /> Use Google Sheets</label>
+    </div>
+
+    <!-- Pipeline toggle -->
+    <div id="pipelineToggleRow">
+      <label>
+        <input type="checkbox" id="pipelineEnabled" />
+        Enable Pre-Enrichment Pipeline &nbsp;
+        <span style="font-weight:normal;font-size:0.85em;color:#555">(Prospeo → Hunter → Bouncer, then ContactOut for misses)</span>
+      </label>
+    </div>
+
+    <!-- Pipeline API keys panel (shown when toggle is on) -->
+    <div id="pipelinePanel">
+      <h3>Pipeline API Keys &amp; Settings</h3>
+
+      <div class="pipeline-section">
+        <label>Prospeo Keys <span style="font-weight:normal;color:#666">(one per line)</span></label>
+        <textarea id="prospeoKeys" placeholder="key_abc123&#10;key_def456&#10;key_ghi789"></textarea>
+        <div class="pipeline-hint">Supports bulk enrichment (50/call). Higher plan = higher RPS — adjust in config.</div>
+      </div>
+
+      <div class="pipeline-section">
+        <label>Hunter.io Keys <span style="font-weight:normal;color:#666">(one per line)</span></label>
+        <textarea id="hunterKeys" placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&#10;yyyyyyyy..."></textarea>
+        <div class="pipeline-hint">Used as fallback when Prospeo finds nothing / Bouncer rejects.</div>
+      </div>
+
+      <div class="pipeline-section">
+        <label>Bouncer Key</label>
+        <input type="text" id="bouncerKey" placeholder="your-bouncer-api-key" />
+        <div class="pipeline-hint">Used to verify emails after Prospeo and Hunter. Very generous rate limit (1000 req/min).</div>
+      </div>
+
+      <button id="savePipelineKeysBtn" onclick="savePipelineKeys()">Save Keys</button>
+      <span id="saveKeysMsg"></span>
+
+      <!-- Key health display -->
+      <div id="keyHealthRow" style="margin-top:0.8em;">
+        <div class="key-health"><span class="key-dot" id="dot-prospeo"></span> Prospeo: <span id="health-prospeo">—</span></div>
+        <div class="key-health"><span class="key-dot" id="dot-hunter"></span> Hunter: <span id="health-hunter">—</span></div>
+        <div class="key-health"><span class="key-dot" id="dot-bouncer"></span> Bouncer: <span id="health-bouncer">—</span></div>
+      </div>
     </div>
 
     <!-- CSV Mode -->
@@ -181,6 +267,27 @@
     </div>
 
     <button id="uploadBtn">Upload Files &amp; Open Browser</button>
+  </div>
+
+  <!-- Pipeline Dashboard (shown during pipeline phase) -->
+  <div id="pipelineDashboard">
+    <h3>Phase 1 — API Enrichment (Prospeo → Hunter → Bouncer)</h3>
+    <div id="pipelinePhaseLabel">Starting pipeline...</div>
+    <div class="pipeline-progress-wrap">
+      <div id="pipelineProgressBar">0%</div>
+    </div>
+    <div id="pipelineStats">
+      <div class="pstat"><span class="pstat-label">Prospeo found</span><span class="pstat-value green" id="stat-prospeo">0</span></div>
+      <div class="pstat"><span class="pstat-label">Hunter found</span><span class="pstat-value blue" id="stat-hunter">0</span></div>
+      <div class="pstat"><span class="pstat-label">Bouncer verified</span><span class="pstat-value green" id="stat-bouncer">0</span></div>
+      <div class="pstat"><span class="pstat-label">ContactOut needed</span><span class="pstat-value orange" id="stat-co">0</span></div>
+      <div class="pstat"><span class="pstat-label">Errors</span><span class="pstat-value red" id="stat-errors">0</span></div>
+    </div>
+    <div id="pipelineControls">
+      <button id="stopPipelineBtn" onclick="stopPipeline()">Stop Pipeline</button>
+      <button id="continueToCOBtn" onclick="continueToContactOut()">Continue to ContactOut →</button>
+      <span id="pipelineStatusText"></span>
+    </div>
   </div>
 
   <!-- Phase 2: Batch Dashboard -->

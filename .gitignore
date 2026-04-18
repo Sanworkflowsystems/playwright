@@ -14,3 +14,9 @@
 # Google OAuth credentials (keep off git)
 /credentials.json
 /tokens.json
+
+# Pipeline API keys (never commit — use pipeline-config.example.json as template)
+/pipeline-config.json
+
+# CSV data files
+*.csv

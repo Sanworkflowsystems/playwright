@@ -1,4 +1,4 @@
-// app.js — Batch enrichment UI logic
+// app.js — Batch enrichment UI logic (ContactOut + Pre-Enrichment Pipeline)
 
 // ---- Account selector ----
 let selectedAccount = 'none';
@@ -374,3 +374,293 @@ async function pollBatchStatus() {
     console.error('Poll error:', err.message);
   }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// PIPELINE — state, controls, polling
+// ════════════════════════════════════════════════════════════════════════════
+
+let pipelineState = {
+  pipelineJobId:   null,
+  pollingInterval: null,
+  sheetJobs:       null,   // remembered so we can hand off to ContactOut
+  isSheetMode:     false,
+  lastStats:       null,
+};
+
+// ── Toggle panel visibility ──────────────────────────────────────────────────
+
+document.getElementById('pipelineEnabled').addEventListener('change', function () {
+  document.getElementById('pipelinePanel').style.display = this.checked ? 'block' : 'none';
+  if (this.checked) loadKeyHealth();
+});
+
+// ── Save keys to server ──────────────────────────────────────────────────────
+
+async function savePipelineKeys() {
+  const prospeoRaw = (document.getElementById('prospeoKeys').value || '').trim();
+  const hunterRaw  = (document.getElementById('hunterKeys').value  || '').trim();
+  const bouncerRaw = (document.getElementById('bouncerKey').value  || '').trim();
+
+  const parseLines = (s) => s.split('\n').map(l => l.trim()).filter(Boolean);
+
+  const body = {
+    prospeo: { keys: parseLines(prospeoRaw) },
+    hunter:  { keys: parseLines(hunterRaw)  },
+    bouncer: { keys: bouncerRaw ? [bouncerRaw] : [] },
+  };
+
+  const msg = document.getElementById('saveKeysMsg');
+  msg.textContent = 'Saving...';
+  msg.style.color = '#555';
+
+  try {
+    const res = await fetch('/pipeline-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    msg.textContent = 'Saved!';
+    msg.style.color = 'green';
+    await loadKeyHealth();
+  } catch (err) {
+    msg.textContent = 'Error: ' + err.message;
+    msg.style.color = 'red';
+  }
+  setTimeout(() => { msg.textContent = ''; }, 4000);
+}
+
+// ── Key health display ───────────────────────────────────────────────────────
+
+async function loadKeyHealth() {
+  try {
+    const res  = await fetch('/pipeline-keys');
+    const data = await res.json();
+
+    for (const svc of ['prospeo', 'hunter', 'bouncer']) {
+      const stats = data[svc];
+      const dot   = document.getElementById(`dot-${svc}`);
+      const label = document.getElementById(`health-${svc}`);
+      if (!stats || !dot || !label) continue;
+
+      const { total, available, onCooldown, dailyPaused } = stats;
+      label.textContent = `${available}/${total} available`;
+      dot.className = 'key-dot ' + (
+        available === total          ? 'green'  :
+        available > 0                ? 'yellow' : 'red'
+      );
+    }
+  } catch (_) { /* ignore — server may not have keys yet */ }
+}
+
+// ── Intercept the Upload button when pipeline is enabled ─────────────────────
+
+const _origUploadClick = document.getElementById('uploadBtn').onclick;
+
+document.getElementById('uploadBtn').addEventListener('click', async function (e) {
+  if (!document.getElementById('pipelineEnabled').checked) return; // normal flow
+  e.stopImmediatePropagation();  // prevent the existing listener from firing
+
+  const mode    = getMode();
+  const btn     = document.getElementById('uploadBtn');
+  btn.disabled  = true;
+  btn.textContent = 'Starting pipeline...';
+
+  try {
+    let body, fetchOpts;
+
+    if (mode === 'sheets') {
+      const sheetJobs = [];
+      document.querySelectorAll('#sheetSlots .sheet-slot-row').forEach(row => {
+        const url     = row.querySelector('.sheet-url-input').value.trim();
+        const tabName = row.querySelector('.sheet-tab-input').value.trim() || '';
+        if (url) sheetJobs.push({ sheetUrl: url, sheetName: tabName });
+      });
+      if (sheetJobs.length === 0) { alert('Enter at least one Google Sheet URL.'); btn.disabled = false; btn.textContent = 'Start Sheet Job & Open Browser'; return; }
+
+      pipelineState.sheetJobs  = sheetJobs;
+      pipelineState.isSheetMode = true;
+      body = JSON.stringify({ sheetJobs });
+      fetchOpts = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body };
+
+    } else {
+      const slotInputs = document.querySelectorAll('.slot-file-input');
+      const files = [];
+      slotInputs.forEach(inp => { if (inp.files[0]) files.push(inp.files[0]); });
+      if (files.length === 0) { alert('Select at least one CSV file.'); btn.disabled = false; btn.textContent = 'Upload Files & Open Browser'; return; }
+
+      pipelineState.isSheetMode = false;
+      const fd = new FormData();
+      files.forEach(f => fd.append('files', f));
+      fetchOpts = { method: 'POST', body: fd };
+    }
+
+    const res = await fetch('/start-pipeline', fetchOpts);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || 'Failed to start pipeline.');
+    }
+    const data = await res.json();
+    pipelineState.pipelineJobId = data.pipelineJobId;
+
+    // Switch to pipeline dashboard
+    document.getElementById('uploadSection').style.display = 'none';
+    document.getElementById('pipelineDashboard').style.display = 'block';
+    document.getElementById('pipelinePhaseLabel').textContent = `Processing ${data.totalRows} rows...`;
+    document.getElementById('stopPipelineBtn').style.display = 'inline-block';
+    document.getElementById('continueToCOBtn').style.display = 'none';
+    document.getElementById('pipelineStatusText').textContent = '';
+
+    startPipelinePolling();
+
+  } catch (err) {
+    alert('Pipeline error: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = mode === 'sheets' ? 'Start Sheet Job & Open Browser' : 'Upload Files & Open Browser';
+  }
+}, true);   // capture phase so we run before the existing bubble-phase listener
+
+// ── Pipeline polling ─────────────────────────────────────────────────────────
+
+function startPipelinePolling() {
+  if (pipelineState.pollingInterval) clearInterval(pipelineState.pollingInterval);
+  pipelineState.pollingInterval = setInterval(pollPipelineStatus, 2000);
+  pollPipelineStatus();
+}
+
+async function pollPipelineStatus() {
+  if (!pipelineState.pipelineJobId) return;
+  try {
+    const res  = await fetch(`/pipeline-status/${pipelineState.pipelineJobId}`);
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const progress = data.progress || 0;
+    const total    = data.total    || 0;
+    const pct      = total > 0 ? Math.round((progress / total) * 100) : 0;
+    const stats    = data.stats   || {};
+    const status   = data.status  || 'running';
+
+    // Progress bar
+    const bar = document.getElementById('pipelineProgressBar');
+    bar.style.width   = `${pct}%`;
+    bar.textContent   = total > 0 ? `${progress} / ${total} (${pct}%)` : 'Starting...';
+    bar.style.background = status === 'finished' ? '#1565c0' : status === 'error' ? '#e53935' : '#43a047';
+
+    // Stats
+    document.getElementById('stat-prospeo').textContent = stats.prospeoResolved  || 0;
+    document.getElementById('stat-hunter').textContent  = stats.hunterResolved   || 0;
+    document.getElementById('stat-bouncer').textContent = stats.bouncerVerified  || 0;
+    document.getElementById('stat-co').textContent      = stats.contactoutNeeded || 0;
+    document.getElementById('stat-errors').textContent  = stats.errors           || 0;
+
+    pipelineState.lastStats = stats;
+
+    // Phase label
+    const phaseLabel = document.getElementById('pipelinePhaseLabel');
+    if (status === 'writing_sheets') {
+      phaseLabel.textContent = 'Writing results to Google Sheets...';
+    } else if (status === 'finished') {
+      phaseLabel.textContent = `Done! ${stats.prospeoResolved + stats.hunterResolved} emails found via API, ${stats.contactoutNeeded || 0} need ContactOut.`;
+    } else if (status === 'error') {
+      phaseLabel.textContent = `Error: ${data.error || 'unknown error'}`;
+    } else {
+      phaseLabel.textContent = `Processing ${total} rows... (${progress} done)`;
+    }
+
+    document.getElementById('pipelineStatusText').textContent = '';
+
+    if (status === 'finished' || status === 'error' || status === 'stopped') {
+      clearInterval(pipelineState.pollingInterval);
+      pipelineState.pollingInterval = null;
+      document.getElementById('stopPipelineBtn').style.display = 'none';
+      if (status === 'finished' && pipelineState.isSheetMode) {
+        document.getElementById('continueToCOBtn').style.display = 'inline-block';
+      }
+    }
+  } catch (err) {
+    console.error('Pipeline poll error:', err.message);
+  }
+}
+
+// ── Stop pipeline ────────────────────────────────────────────────────────────
+
+async function stopPipeline() {
+  if (!pipelineState.pipelineJobId) return;
+  try {
+    await fetch(`/stop-pipeline/${pipelineState.pipelineJobId}`, { method: 'POST' });
+    document.getElementById('pipelineStatusText').textContent = 'Stop signal sent.';
+  } catch (err) {
+    document.getElementById('pipelineStatusText').textContent = 'Stop error: ' + err.message;
+  }
+}
+
+// ── Continue to ContactOut for unresolved rows ────────────────────────────────
+
+async function continueToContactOut() {
+  if (!pipelineState.isSheetMode || !pipelineState.sheetJobs) {
+    alert('ContactOut handoff only available in Google Sheets mode.');
+    return;
+  }
+
+  const btn = document.getElementById('continueToCOBtn');
+  btn.disabled    = true;
+  btn.textContent = 'Launching ContactOut...';
+
+  const manual  = document.getElementById('manualLogin').checked;
+  const cookies = document.getElementById('cookies').value;
+
+  try {
+    const res = await fetch('/start-sheet-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sheetJobs:    pipelineState.sheetJobs,
+        cookies,
+        manual_login: manual ? 'true' : 'false',
+        account:      selectedAccount,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || 'Failed to start ContactOut batch.');
+    }
+    const data = await res.json();
+
+    batchState.batchId    = data.batchId;
+    batchState.jobSpecs   = data.jobSpecs;
+    batchState.isManual   = manual;
+    batchState.isSheetMode = true;
+
+    document.getElementById('pipelineDashboard').style.display = 'none';
+    switchToDashboard(data.jobSpecs, manual, true);
+  } catch (err) {
+    alert('ContactOut launch error: ' + err.message);
+    btn.disabled    = false;
+    btn.textContent = 'Continue to ContactOut →';
+  }
+}
+
+// ── Load saved keys into the textareas on page load ──────────────────────────
+
+(async function loadSavedKeys() {
+  try {
+    const res  = await fetch('/pipeline-config');
+    if (!res.ok) return;
+    const cfg  = await res.json();
+
+    // Keys are redacted (…suffix) so just show count hints, not values
+    if (cfg.prospeo?.keyCount > 0) {
+      document.getElementById('prospeoKeys').placeholder =
+        `${cfg.prospeo.keyCount} key(s) saved — paste to replace`;
+    }
+    if (cfg.hunter?.keyCount > 0) {
+      document.getElementById('hunterKeys').placeholder =
+        `${cfg.hunter.keyCount} key(s) saved — paste to replace`;
+    }
+    if (cfg.bouncer?.keyCount > 0) {
+      document.getElementById('bouncerKey').placeholder =
+        `1 key saved — paste to replace`;
+    }
+  } catch (_) { /* ignore */ }
+})();

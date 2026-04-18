@@ -14,6 +14,11 @@ if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
 const OUTPUT_DIR = path.join(__dirname, 'outputs');
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR);
 
+// ---- Pipeline modules ----
+const { createOrchestrator, resetOrchestrator } = require('./pipeline/orchestrator');
+const { loadConfig, saveConfig }               = require('./pipeline/pipeline-config');
+const csvParser = require('csv-parser');
+
 // Hardcode the selectors as requested
 const HARDCODED_SELECTORS = {
     "SEARCH_PAGE_URL": "https://contactout.com/dashboard/search",
@@ -438,6 +443,211 @@ app.post('/stop-batch/:batchId', (req, res) => {
   console.log(`Sending stop signal to batch ${batch.batchId}...`);
   batch.process.kill('SIGTERM');
   res.status(200).send('Batch stop signal sent.');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PIPELINE ENDPOINTS
+// ════════════════════════════════════════════════════════════════════════════
+
+// In-memory store for running pipeline jobs
+const pipelineJobs = {};   // pipelineJobId → { abortController, status }
+
+function getOrInitOrchestrator() {
+  return createOrchestrator(false);
+}
+
+// Helper: parse a CSV file into headers + rows
+function parseCsvFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const rows = [];
+    let headers = null;
+    fs.createReadStream(filePath)
+      .pipe(csvParser())
+      .on('headers', (h) => { headers = h; })
+      .on('data',    (row) => rows.push(row))
+      .on('error',   reject)
+      .on('end',     () => resolve({ headers: headers || [], rows }));
+  });
+}
+
+/**
+ * POST /start-pipeline
+ * Body (JSON, sheets mode):   { sheetJobs: [{ sheetUrl, sheetName }] }
+ * Body (multipart, CSV mode): files[] field with one CSV
+ *
+ * Returns: { pipelineJobId, totalRows }
+ * Pipeline runs in background — poll /pipeline-status/:id
+ */
+app.post('/start-pipeline', upload.array('files', 1), async (req, res) => {
+  const pipelineJobId = uuidv4();
+  const progressPath  = path.join(OUTPUT_DIR, `${pipelineJobId}-pipeline.json`);
+
+  fs.writeFileSync(progressPath, JSON.stringify({
+    status: 'starting', progress: 0, total: 0, stats: {}, updatedAt: new Date().toISOString()
+  }));
+
+  let rows    = [];
+  let headers = [];
+  let sheetId   = null;
+  let sheetName = null;
+
+  try {
+    // ── Sheets mode ──
+    if (req.body && req.body.sheetJobs) {
+      if (!sheetsClient) {
+        return res.status(401).json({ error: 'Not authenticated with Google. Visit /auth/google first.' });
+      }
+      const sheetJobs = typeof req.body.sheetJobs === 'string'
+        ? JSON.parse(req.body.sheetJobs)
+        : req.body.sheetJobs;
+
+      if (!sheetJobs || sheetJobs.length === 0) {
+        return res.status(400).json({ error: 'No sheet jobs provided.' });
+      }
+
+      const { sheetUrl, sheetName: sn } = sheetJobs[0];
+      sheetId   = extractSheetId(sheetUrl);
+      sheetName = sn || null;
+
+      const { readSheetData, getFirstSheetName } = require('./google-sheets-helper');
+      if (!sheetName) sheetName = await getFirstSheetName(sheetsClient, sheetId);
+      const data = await readSheetData(sheetsClient, sheetId, sheetName);
+      rows    = data.rows;
+      headers = data.headers;
+
+    // ── CSV mode ──
+    } else if (req.files && req.files.length > 0) {
+      const file = req.files[0];
+      const data = await parseCsvFile(file.path);
+      rows    = data.rows;
+      headers = data.headers;
+
+    } else {
+      return res.status(400).json({ error: 'Provide sheetJobs (JSON) or a CSV file.' });
+    }
+
+    if (rows.length === 0) {
+      return res.status(400).json({ error: 'No rows found to process.' });
+    }
+
+    res.json({ pipelineJobId, totalRows: rows.length });
+
+    // ── Run pipeline in background (no await) ──
+    const abortController = new AbortController();
+    pipelineJobs[pipelineJobId] = { abortController, status: 'running' };
+
+    const orchestrator = getOrInitOrchestrator();
+    orchestrator.processRows(rows, {
+      pipelineJobId,
+      outputDir:   OUTPUT_DIR,
+      sheetsClient: sheetId ? sheetsClient : null,
+      sheetId,
+      sheetName,
+      headers,
+      signal: abortController.signal,
+    }).then(({ stats }) => {
+      pipelineJobs[pipelineJobId].status = 'finished';
+      pipelineJobs[pipelineJobId].stats  = stats;
+      console.log(`[Pipeline ${pipelineJobId}] Finished`, stats);
+    }).catch(err => {
+      console.error(`[Pipeline ${pipelineJobId}] Fatal error:`, err.message);
+      pipelineJobs[pipelineJobId].status = 'error';
+      fs.writeFileSync(progressPath, JSON.stringify({
+        status: 'error', error: err.message, updatedAt: new Date().toISOString()
+      }));
+    });
+
+  } catch (err) {
+    console.error('[/start-pipeline]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /pipeline-status/:id
+ * Returns the progress JSON written by the orchestrator.
+ */
+app.get('/pipeline-status/:id', (req, res) => {
+  const progressPath = path.join(OUTPUT_DIR, `${req.params.id}-pipeline.json`);
+  if (!fs.existsSync(progressPath)) return res.status(404).json({ error: 'Pipeline job not found.' });
+  try {
+    res.json(JSON.parse(fs.readFileSync(progressPath, 'utf8')));
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to read pipeline status.' });
+  }
+});
+
+/**
+ * POST /stop-pipeline/:id
+ * Aborts the running pipeline via AbortController.
+ */
+app.post('/stop-pipeline/:id', (req, res) => {
+  const job = pipelineJobs[req.params.id];
+  if (!job) return res.status(404).json({ error: 'Pipeline job not found.' });
+  job.abortController.abort();
+  job.status = 'stopped';
+  res.json({ ok: true });
+});
+
+/**
+ * GET /pipeline-keys
+ * Returns live key health stats for all three services.
+ */
+app.get('/pipeline-keys', (req, res) => {
+  try {
+    const orch = createOrchestrator(false);
+    res.json({
+      prospeo: orch.pools.prospeo.getStats(),
+      hunter:  orch.pools.hunter.getStats(),
+      bouncer: orch.pools.bouncer.getStats(),
+    });
+  } catch (e) {
+    res.json({ prospeo: null, hunter: null, bouncer: null });
+  }
+});
+
+/**
+ * POST /pipeline-keys
+ * Body: { prospeo: { keys: [] }, hunter: { keys: [] }, bouncer: { keys: [] }, pipeline: {} }
+ * Saves to pipeline-config.json and re-initialises key pools.
+ */
+app.post('/pipeline-keys', (req, res) => {
+  try {
+    const current = loadConfig();
+    const { prospeo, hunter, bouncer, pipeline } = req.body || {};
+
+    if (prospeo?.keys !== undefined) current.prospeo.keys = prospeo.keys;
+    if (hunter?.keys  !== undefined) current.hunter.keys  = hunter.keys;
+    if (bouncer?.keys !== undefined) current.bouncer.keys = bouncer.keys;
+    if (pipeline)                    current.pipeline      = { ...current.pipeline, ...pipeline };
+
+    saveConfig(current);
+    resetOrchestrator();   // force re-init on next request
+    res.json({ ok: true, message: 'Keys saved. Orchestrator will reload on next pipeline run.' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * GET /pipeline-config
+ * Returns current pipeline configuration (keys redacted for safety).
+ */
+app.get('/pipeline-config', (req, res) => {
+  try {
+    const cfg = loadConfig();
+    // Redact actual key values
+    const safe = JSON.parse(JSON.stringify(cfg));
+    ['prospeo', 'hunter', 'bouncer'].forEach(svc => {
+      if (safe[svc]?.keys) {
+        safe[svc].keyCount = safe[svc].keys.length;
+        safe[svc].keys = safe[svc].keys.map(k => '…' + k.slice(-6));
+      }
+    });
+    res.json(safe);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ---- Single-job queue runner ----

@@ -1,0 +1,38 @@
+{
+  "prospeo": {
+    "keys": [
+      "YOUR_PROSPEO_KEY_1",
+      "YOUR_PROSPEO_KEY_2",
+      "YOUR_PROSPEO_KEY_3"
+    ],
+    "cooldownMs": 60000,
+    "dailyLimit": 0,
+    "requestsPerSecond": 5,
+    "enabled": true,
+    "bulkSize": 50
+  },
+  "hunter": {
+    "keys": [
+      "YOUR_HUNTER_KEY_1",
+      "YOUR_HUNTER_KEY_2"
+    ],
+    "cooldownMs": 60000,
+    "dailyLimit": 0,
+    "requestsPerSecond": 10,
+    "enabled": true
+  },
+  "bouncer": {
+    "keys": [
+      "YOUR_BOUNCER_KEY_1"
+    ],
+    "cooldownMs": 10000,
+    "dailyLimit": 0,
+    "requestsPerSecond": 16,
+    "enabled": true
+  },
+  "pipeline": {
+    "maxRetries": 3,
+    "skipIfEmailExists": true,
+    "acceptRiskyEmails": true
+  }
+}
