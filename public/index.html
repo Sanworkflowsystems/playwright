@@ -35,6 +35,21 @@
     textarea { width: 100%; max-width: 500px; }
     #uploadBtn { margin-top: 1em; padding: 0.5em 1.5em; font-size: 1em; cursor: pointer; }
 
+    /* Account selector */
+    #accountSelector { margin-top: 1.2em; margin-bottom: 0.4em; }
+    #accountSelector p { margin: 0 0 0.5em 0; font-weight: bold; }
+    .account-btn-group { display: flex; gap: 0.6em; flex-wrap: wrap; }
+    .account-btn {
+      padding: 0.45em 1.2em; font-size: 0.95em; cursor: pointer;
+      border: 2px solid #ccc; border-radius: 6px; background: #f9f9f9;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .account-btn.selected {
+      border-color: #1976d2; background: #e3f0fb; font-weight: bold;
+    }
+    .account-btn:hover:not(.selected) { border-color: #999; background: #f0f0f0; }
+    #accountNote { font-size: 0.85em; color: #555; margin-top: 0.4em; }
+
     /* Dashboard section */
     #dashboardSection { display: none; }
     #batchControls { margin-bottom: 1em; display: flex; gap: 1em; align-items: center; flex-wrap: wrap; }
@@ -52,6 +67,15 @@
     .progress-bar { height: 100%; width: 0%; background: #4caf50; border-radius: 4px; text-align: center; font-size: 0.75em; line-height: 18px; color: white; transition: width 0.4s; white-space: nowrap; }
     .panel-download { display: none; margin-top: 0.6em; font-size: 0.9em; font-weight: bold; color: #1976d2; }
     .panel-download:hover { text-decoration: underline; }
+
+    /* Verify code banner */
+    #verifyBanner { display: none; margin-bottom: 1.2em; padding: 1em 1.2em; background: #fff8e1; border: 2px solid #f59e0b; border-radius: 8px; }
+    #verifyBanner h3 { margin: 0 0 0.5em 0; color: #92400e; font-size: 1em; }
+    #verifyBanner p { margin: 0 0 0.7em 0; font-size: 0.9em; color: #444; }
+    #verifyCodeInput { font-size: 1.4em; letter-spacing: 0.3em; width: 180px; padding: 0.3em 0.5em; border: 2px solid #ccc; border-radius: 6px; text-align: center; }
+    #verifySubmitBtn { margin-left: 0.8em; padding: 0.4em 1.2em; background: #7c3aed; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 1em; }
+    #verifySubmitBtn:hover { background: #6d28d9; }
+    #verifyMsg { margin-top: 0.5em; font-size: 0.85em; color: #555; }
   </style>
 </head>
 <body>
@@ -137,6 +161,16 @@
       </div>
     </div>
 
+    <div id="accountSelector">
+      <p>Select account to use:</p>
+      <div class="account-btn-group">
+        <button class="account-btn" data-account="none" onclick="selectAccount('none')">No auto-login</button>
+        <button class="account-btn" data-account="1" onclick="selectAccount('1')">Account 1</button>
+        <button class="account-btn" data-account="2" onclick="selectAccount('2')">Account 2</button>
+      </div>
+      <div id="accountNote">Select an account to have the script log in automatically via Google. Or choose "No auto-login" to use manual login or cookies.</div>
+    </div>
+
     <div id="uploadOptions">
       <label>
         <input type="checkbox" id="manualLogin" checked />
@@ -152,6 +186,16 @@
   <!-- Phase 2: Batch Dashboard -->
   <div id="dashboardSection">
     <h2>Batch Status Dashboard</h2>
+
+    <!-- Verification code banner — shown when ContactOut asks for email code -->
+    <div id="verifyBanner">
+      <h3>Verification Required</h3>
+      <p id="verifyBannerMsg">ContactOut sent a 6-digit code to your email. Enter it below:</p>
+      <input type="text" id="verifyCodeInput" maxlength="6" placeholder="123456" />
+      <button id="verifySubmitBtn" onclick="submitVerifyCode()">Submit Code</button>
+      <div id="verifyMsg"></div>
+    </div>
+
     <div id="batchControls">
       <button id="startBatchBtn">I've logged in — Start Processing All Tabs</button>
       <button id="stopBatchBtn">Stop All Jobs</button>

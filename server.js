@@ -153,7 +153,7 @@ app.get('/auth/status', (req, res) => {
 app.post('/start-sheet-batch', async (req, res) => {
   if (!sheetsClient) return res.status(401).json({ error: 'Not authenticated with Google. Visit /auth/google first.' });
 
-  const { sheetJobs, cookies, manual_login } = req.body;
+  const { sheetJobs, cookies, manual_login, account } = req.body;
   if (!sheetJobs || sheetJobs.length === 0) return res.status(400).json({ error: 'No sheet jobs provided.' });
 
   const batchId = uuidv4();
@@ -189,7 +189,7 @@ app.post('/start-sheet-batch', async (req, res) => {
       createdAt: new Date().toISOString(),
       progress: 0,
       total: 0,
-      details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS }
+      details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS, account: account || 'none' }
     };
 
     fs.writeFileSync(statusPath, JSON.stringify({ status: 'queued', progress: 0, total: 0 }));
@@ -199,7 +199,7 @@ app.post('/start-sheet-batch', async (req, res) => {
     batchId,
     status: 'queued',
     jobSpecs: jobSpecsList,
-    details: { cookies, manual_login: manual_login === 'true' },
+    details: { cookies, manual_login: manual_login === 'true', account: account || 'none' },
     createdAt: new Date().toISOString(),
     process: null,
     isSheetMode: true
@@ -229,7 +229,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).send('No file uploaded.');
 
-  const { cookies, manual_login } = req.body;
+  const { cookies, manual_login, account } = req.body;
   const jobId = uuidv4();
   const outputPath = path.join(__dirname, 'outputs', enrichedFilename(file.originalname, jobId));
   const statusPath = path.join(__dirname, 'outputs', `${jobId}.json`);
@@ -243,7 +243,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
     createdAt: new Date().toISOString(),
     progress: 0,
     total: 0,
-    details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS, originalFilename: file.originalname }
+    details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS, originalFilename: file.originalname, account: account || 'none' }
   };
   queue.push(jobId);
   res.json({ jobId });
@@ -304,7 +304,7 @@ app.post('/upload-batch', upload.array('files', 5), (req, res) => {
   const files = req.files;
   if (!files || files.length === 0) return res.status(400).send('No files uploaded.');
 
-  const { cookies, manual_login } = req.body;
+  const { cookies, manual_login, account } = req.body;
   const batchId = uuidv4();
   const jobSpecsList = [];
 
@@ -333,7 +333,7 @@ app.post('/upload-batch', upload.array('files', 5), (req, res) => {
       createdAt: new Date().toISOString(),
       progress: 0,
       total: 0,
-      details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS, originalFilename: file.originalname }
+      details: { cookies, manual_login: manual_login === 'true', selectors: HARDCODED_SELECTORS, originalFilename: file.originalname, account: account || 'none' }
     };
 
     fs.writeFileSync(statusPath, JSON.stringify({ status: 'queued', progress: 0, total: 0 }));
@@ -343,7 +343,7 @@ app.post('/upload-batch', upload.array('files', 5), (req, res) => {
     batchId,
     status: 'queued',
     jobSpecs: jobSpecsList,
-    details: { cookies, manual_login: manual_login === 'true' },
+    details: { cookies, manual_login: manual_login === 'true', account: account || 'none' },
     createdAt: new Date().toISOString(),
     process: null
   };
@@ -410,6 +410,23 @@ app.post('/signal-start-batch/:batchId', (req, res) => {
   res.status(200).send('Batch start signal sent.');
 });
 
+// ---- Verify code endpoints ----
+// Worker writes a .verify file when it needs a code; UI polls this.
+// User submits code via POST; worker reads it and continues.
+
+app.get('/verify-status/:jobId', (req, res) => {
+  const verifyPath = path.join(__dirname, 'outputs', `${req.params.jobId}.verify`);
+  res.json({ waiting: fs.existsSync(verifyPath) });
+});
+
+app.post('/submit-verify/:jobId', (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'No code provided.' });
+  const codePath = path.join(__dirname, 'outputs', `${req.params.jobId}.verifycode`);
+  fs.writeFileSync(codePath, code.trim());
+  res.json({ ok: true });
+});
+
 app.post('/stop-batch/:batchId', (req, res) => {
   const batch = batches[req.params.batchId];
   if (!batch) return res.status(404).send('Batch not found.');
@@ -456,7 +473,8 @@ function runWorker(job) {
     const env = Object.assign({}, process.env, {
       JOB_SELECTORS: JSON.stringify(job.details.selectors),
       JOB_COOKIES: job.details.cookies || '',
-      JOB_MANUAL: job.details.manual_login ? '1' : '0'
+      JOB_MANUAL: job.details.manual_login ? '1' : '0',
+      JOB_ACCOUNT: job.details.account || 'none'
     });
     const child = spawn('node', ['worker.js', ...args], { stdio: 'inherit', env });
     job.process = child;
@@ -515,6 +533,7 @@ function runBatchWorker(batch) {
       JOB_SELECTORS: JSON.stringify(HARDCODED_SELECTORS),
       JOB_COOKIES: batch.details.cookies || '',
       JOB_MANUAL: batch.details.manual_login ? '1' : '0',
+      JOB_ACCOUNT: batch.details.account || 'none',
       BATCH_SHEET_MODE: isSheetMode ? '1' : '',
       GOOGLE_TOKENS: isSheetMode && fs.existsSync(TOKENS_PATH) ? fs.readFileSync(TOKENS_PATH, 'utf8') : '',
       GOOGLE_CREDENTIALS: isSheetMode && fs.existsSync(CREDENTIALS_PATH) ? fs.readFileSync(CREDENTIALS_PATH, 'utf8') : '',

@@ -27,6 +27,12 @@ const MANUAL_LOGIN = process.env.JOB_MANUAL === '1';
 const IS_HEADLESS = false;
 const SHEET_MODE = process.env.BATCH_SHEET_MODE === '1';
 
+const JOB_ACCOUNT = process.env.JOB_ACCOUNT || 'none';
+const ACCOUNT_EMAIL = JOB_ACCOUNT === '1' ? process.env.ACCOUNT1_EMAIL
+  : JOB_ACCOUNT === '2' ? process.env.ACCOUNT2_EMAIL : null;
+const ACCOUNT_PASSWORD = JOB_ACCOUNT === '1' ? process.env.ACCOUNT1_PASSWORD
+  : JOB_ACCOUNT === '2' ? process.env.ACCOUNT2_PASSWORD : null;
+
 const {
   FULL_NAME_COLUMN_INDEX,
   COMPANY_NAME_COLUMN_INDEX,
@@ -48,13 +54,86 @@ const personalEmailDomains = [
 ];
 
 function randBetween(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+function getDynamicWaitTime() { return randBetween(3000, 5000); }
+function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+function isLoginPage(url) { return url.includes('/login') || url.includes('/signin'); }
 
-function getDynamicWaitTime() {
-  return randBetween(3000, 5000);
+async function loginWithGoogle(page, email, password, jobId) {
+  console.log(`[Auto-login] Logging in as: ${email}`);
+  await page.waitForSelector('input[type="email"]', { state: 'visible', timeout: 15000 });
+  console.log('[Auto-login] Login form visible.');
+  await page.waitForTimeout(randBetween(1200, 2000));
+
+  await page.click('input[type="email"]');
+  await page.waitForTimeout(randBetween(200, 400));
+  for (const char of email) {
+    await page.type('input[type="email"]', char, { delay: randBetween(60, 140) });
+    if (Math.random() < 0.06) await page.waitForTimeout(randBetween(150, 400));
+  }
+  console.log('[Auto-login] Email typed.');
+
+  await page.waitForTimeout(randBetween(600, 1100));
+  await page.click('input[type="password"]');
+  await page.waitForTimeout(randBetween(200, 400));
+  for (const char of password) {
+    await page.type('input[type="password"]', char, { delay: randBetween(60, 140) });
+    if (Math.random() < 0.06) await page.waitForTimeout(randBetween(150, 400));
+  }
+  console.log('[Auto-login] Password typed.');
+
+  await page.waitForTimeout(randBetween(700, 1400));
+  await page.click('button[type="submit"]');
+  console.log('[Auto-login] Clicked Login, waiting...');
+
+  await page.waitForTimeout(3000);
+  const urlAfter = page.url();
+  console.log(`[Auto-login] URL after submit: ${urlAfter}`);
+
+  if (urlAfter.includes('/login/verify')) {
+    console.log('[Auto-login] Verification required — waiting for code from UI...');
+    await handleVerifyCode(page, jobId);
+  } else if (urlAfter.includes('/login')) {
+    console.log('[Auto-login] Still on login page — credentials may be wrong.');
+  } else {
+    console.log('[Auto-login] Login successful.');
+  }
+  await page.waitForTimeout(randBetween(1500, 2500));
 }
 
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+async function handleVerifyCode(page, jobId) {
+  const verifySignalPath = path.join(__dirname, 'outputs', `${jobId}.verify`);
+  const verifyCodePath   = path.join(__dirname, 'outputs', `${jobId}.verifycode`);
+  fs.writeFileSync(verifySignalPath, '');
+  console.log('[Verify] Waiting for user to enter code in UI (up to 2 min)...');
+  let code = null;
+  for (let i = 0; i < 120; i++) {
+    if (fs.existsSync(verifyCodePath)) {
+      code = fs.readFileSync(verifyCodePath, 'utf8').trim();
+      fs.unlinkSync(verifyCodePath);
+      break;
+    }
+    await delay(1000);
+  }
+  try { fs.unlinkSync(verifySignalPath); } catch (e) {}
+  if (!code || code.length !== 6) { console.log('[Verify] No valid code received.'); return; }
+  console.log(`[Verify] Filling code: ${code}`);
+  const boxes = page.locator('input.email-code');
+  const count = await boxes.count();
+  for (let i = 0; i < Math.min(code.length, count); i++) {
+    await boxes.nth(i).click();
+    await page.waitForTimeout(randBetween(80, 160));
+    await boxes.nth(i).type(code[i], { delay: randBetween(60, 120) });
+    await page.waitForTimeout(randBetween(60, 130));
+  }
+  await page.waitForTimeout(randBetween(400, 800));
+  await page.click('#verify');
+  console.log('[Verify] Clicked Verify.');
+  try {
+    await page.waitForURL(url => !url.includes('/login'), { timeout: 15000 });
+    console.log('[Verify] Verified successfully.');
+  } catch (e) {
+    console.log('[Verify] Still on verify page after submit.');
+  }
 }
 
 function writeBatchProgress(batchId, allJobStates) {
@@ -388,8 +467,19 @@ function buildInitialStates() {
 
   context = await chromium.launchPersistentContext(userDataDir, {
     headless: IS_HEADLESS,
-    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox',
+      '--restore-last-session=false',
+      '--no-session-restore',
+      '--hide-crash-restore-bubble',
+    ],
     ...browserContextOptions
+  });
+
+  // Dismiss any native restore dialog
+  context.on('page', p => {
+    p.on('dialog', async d => { try { await d.dismiss(); } catch(e) {} });
   });
 
   if (COOKIES_STRING) {
@@ -401,26 +491,46 @@ function buildInitialStates() {
     await context.addCookies(cookies);
   }
 
-  const pages = [];
   const initialUrl = SEARCH_PAGE_URL || 'https://contactout.com/dashboard/search';
-  for (let i = 0; i < jobSpecs.length; i++) {
-    if (i > 0) await delay(1000);
+
+  // --- Login on the first page ---
+  const existingPages = context.pages();
+  const loginPage = existingPages.length > 0 ? existingPages[existingPages.length - 1] : await context.newPage();
+  loginPage.setDefaultTimeout(60000);
+  loginPage.on('dialog', async d => { try { await d.dismiss(); } catch(e) {} });
+
+  if (ACCOUNT_EMAIL && ACCOUNT_PASSWORD) {
+    console.log(`[batch:${batchId}] Auto-login with account: ${ACCOUNT_EMAIL}`);
+    await loginPage.goto('https://contactout.com/login', { waitUntil: 'domcontentloaded' });
+    await loginPage.waitForTimeout(3000);
+    const currentUrl = loginPage.url();
+    console.log(`[batch:${batchId}] URL after goto: ${currentUrl}`);
+    if (isLoginPage(currentUrl)) {
+      try {
+        // Use the first jobId for the verify signal
+        await loginWithGoogle(loginPage, ACCOUNT_EMAIL, ACCOUNT_PASSWORD, jobSpecs[0].jobId);
+      } catch (e) {
+        console.error(`[batch:${batchId}] Login error: ${e.message}`);
+      }
+    } else {
+      console.log(`[batch:${batchId}] Already logged in.`);
+    }
+    await loginPage.goto(initialUrl, { waitUntil: 'domcontentloaded' });
+  } else if (MANUAL_LOGIN) {
+    await loginPage.goto(initialUrl, { waitUntil: 'domcontentloaded' });
+    await waitForStartSignal(batchId);
+  } else {
+    await loginPage.goto(initialUrl, { waitUntil: 'domcontentloaded' });
+  }
+
+  // --- Open remaining tabs ---
+  const pages = [loginPage];
+  for (let i = 1; i < jobSpecs.length; i++) {
+    await delay(1000);
     const p = await context.newPage();
     p.setDefaultTimeout(60000);
     await p.goto(initialUrl, { waitUntil: 'domcontentloaded' });
     pages.push(p);
-  }
-
-  if (MANUAL_LOGIN) {
-    await waitForStartSignal(batchId);
-  }
-
-  if (pages.length > 1) {
-    console.log(`[batch:${batchId}] Re-navigating ${pages.length - 1} additional tab(s) to search page after login...`);
-    for (let i = 1; i < pages.length; i++) {
-      await pages[i].goto(initialUrl, { waitUntil: 'domcontentloaded' });
-      await delay(500);
-    }
   }
 
   try {

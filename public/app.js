@@ -1,5 +1,26 @@
 // app.js — Batch enrichment UI logic
 
+// ---- Account selector ----
+let selectedAccount = 'none';
+
+function selectAccount(account) {
+  selectedAccount = account;
+  document.querySelectorAll('.account-btn').forEach(btn => {
+    btn.classList.toggle('selected', btn.dataset.account === account);
+  });
+  const note = document.getElementById('accountNote');
+  if (account === 'none') {
+    note.textContent = 'Select an account to have the script log in automatically via Google. Or choose "No auto-login" to use manual login or cookies.';
+    document.getElementById('manualLogin').disabled = false;
+  } else {
+    note.textContent = `Account ${account} selected — the script will handle Google login automatically. Manual login checkbox is ignored.`;
+    document.getElementById('manualLogin').disabled = true;
+  }
+}
+
+// Default selection
+selectAccount('none');
+
 // Show filename next to each slot input when a file is selected
 document.querySelectorAll('.slot-file-input').forEach(input => {
   input.addEventListener('change', () => {
@@ -83,6 +104,7 @@ document.getElementById('uploadBtn').addEventListener('click', async () => {
     files.forEach(f => fd.append('files', f));
     fd.append('manual_login', manual ? 'true' : 'false');
     fd.append('cookies', cookies);
+    fd.append('account', selectedAccount);
 
     btn.disabled = true;
     btn.textContent = 'Uploading...';
@@ -120,7 +142,7 @@ document.getElementById('uploadBtn').addEventListener('click', async () => {
       const res = await fetch('/start-sheet-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sheetJobs, cookies, manual_login: manual ? 'true' : 'false' })
+        body: JSON.stringify({ sheetJobs, cookies, manual_login: manual ? 'true' : 'false', account: selectedAccount })
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -168,6 +190,10 @@ function switchToDashboard(jobSpecs, isManual, isSheetMode) {
       panel.classList.remove('visible');
     }
   }
+
+  // Always start verify polling so we catch the email code prompt
+  const jobIds = jobSpecs.map(s => s.jobId);
+  startVerifyPolling(jobIds);
 
   if (isManual) {
     const startBtn = document.getElementById('startBatchBtn');
@@ -218,6 +244,64 @@ async function stopBatch() {
     document.getElementById('batchStatusText').textContent = `Stop error: ${err.message}`;
     stopBtn.disabled = false;
     stopBtn.textContent = 'Stop All Jobs';
+  }
+}
+
+// ---- Verify code handling ----
+let verifyPollInterval = null;
+let currentVerifyJobId = null;
+
+function startVerifyPolling(jobIds) {
+  if (verifyPollInterval) clearInterval(verifyPollInterval);
+  verifyPollInterval = setInterval(() => pollVerifyStatus(jobIds), 2000);
+}
+
+async function pollVerifyStatus(jobIds) {
+  for (const jobId of jobIds) {
+    try {
+      const res = await fetch(`/verify-status/${jobId}`);
+      const data = await res.json();
+      if (data.waiting) {
+        currentVerifyJobId = jobId;
+        document.getElementById('verifyBanner').style.display = 'block';
+        document.getElementById('verifyBannerMsg').textContent =
+          `ContactOut sent a 6-digit code to the account email. Enter it below:`;
+        document.getElementById('verifyMsg').textContent = '';
+        return;
+      }
+    } catch (e) { /* ignore */ }
+  }
+  // No job waiting — hide banner
+  document.getElementById('verifyBanner').style.display = 'none';
+  currentVerifyJobId = null;
+}
+
+async function submitVerifyCode() {
+  const code = document.getElementById('verifyCodeInput').value.trim();
+  if (!code || code.length !== 6) {
+    document.getElementById('verifyMsg').textContent = 'Please enter the full 6-digit code.';
+    return;
+  }
+  if (!currentVerifyJobId) {
+    document.getElementById('verifyMsg').textContent = 'No job is waiting for a code right now.';
+    return;
+  }
+  try {
+    const res = await fetch(`/submit-verify/${currentVerifyJobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code })
+    });
+    if (res.ok) {
+      document.getElementById('verifyMsg').textContent = 'Code submitted! The script will continue shortly...';
+      document.getElementById('verifyCodeInput').value = '';
+      document.getElementById('verifyBanner').style.display = 'none';
+      currentVerifyJobId = null;
+    } else {
+      document.getElementById('verifyMsg').textContent = 'Failed to submit code. Try again.';
+    }
+  } catch (e) {
+    document.getElementById('verifyMsg').textContent = 'Error: ' + e.message;
   }
 }
 

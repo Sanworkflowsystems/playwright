@@ -28,7 +28,16 @@ if (!fs.existsSync(userDataDir)) fs.mkdirSync(userDataDir);
 const selectorsConfig = process.env.JOB_SELECTORS ? JSON.parse(process.env.JOB_SELECTORS) : {};
 const COOKIES_STRING = process.env.JOB_COOKIES || '';
 const MANUAL_LOGIN = process.env.JOB_MANUAL === '1';
+const JOB_ACCOUNT = process.env.JOB_ACCOUNT || 'none';
 const IS_HEADLESS = false; // FOR LOCAL DEBUGGING
+
+// Resolve credentials from env based on selected account
+const ACCOUNT_EMAIL = JOB_ACCOUNT === '1' ? process.env.ACCOUNT1_EMAIL
+  : JOB_ACCOUNT === '2' ? process.env.ACCOUNT2_EMAIL
+  : null;
+const ACCOUNT_PASSWORD = JOB_ACCOUNT === '1' ? process.env.ACCOUNT1_PASSWORD
+  : JOB_ACCOUNT === '2' ? process.env.ACCOUNT2_PASSWORD
+  : null;
 
 const {
   FULL_NAME_COLUMN_INDEX,
@@ -51,6 +60,196 @@ function randBetween(min, max) { return Math.floor(Math.random() * (max - min + 
 
 function getDynamicWaitTime() {
   return randBetween(5000, 8000); // 5-8 seconds
+}
+
+// Move mouse in a loose arc toward a target element before clicking — feels human
+async function humanMouseMove(page, locator) {
+  const box = await locator.boundingBox();
+  if (!box) return;
+  // Target a random spot inside the element (not always dead centre)
+  const targetX = box.x + box.width  * (0.3 + Math.random() * 0.4);
+  const targetY = box.y + box.height * (0.3 + Math.random() * 0.4);
+  // Move in 3-6 small steps with slight random drift
+  const steps = randBetween(3, 6);
+  const startX = randBetween(200, 800);
+  const startY = randBetween(200, 500);
+  await page.mouse.move(startX, startY);
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const jitterX = randBetween(-8, 8);
+    const jitterY = randBetween(-5, 5);
+    await page.mouse.move(
+      startX + (targetX - startX) * t + jitterX,
+      startY + (targetY - startY) * t + jitterY
+    );
+    await page.waitForTimeout(randBetween(20, 60));
+  }
+  await page.mouse.move(targetX, targetY);
+}
+
+// Click an element with human-like mouse approach + small pre-click pause
+async function humanClick(page, locator) {
+  await humanMouseMove(page, locator);
+  await page.waitForTimeout(randBetween(80, 200));
+  await locator.click();
+}
+
+// Type into a field one character at a time with realistic rhythm
+async function humanType(page, selector, text) {
+  const el = page.locator(selector).first();
+  await humanMouseMove(page, el);
+  await page.waitForTimeout(randBetween(120, 300));
+  // Click to focus, then clear any existing value
+  await el.click({ clickCount: 3 }); // triple-click selects all existing text
+  await page.waitForTimeout(randBetween(100, 200));
+  await page.keyboard.press('Backspace'); // clear selection
+  await page.waitForTimeout(randBetween(150, 300));
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+
+    // ~3% chance of a typo — type a wrong adjacent key then backspace
+    if (Math.random() < 0.03 && char.match(/[a-zA-Z]/)) {
+      const wrongKey = String.fromCharCode(char.charCodeAt(0) + (Math.random() < 0.5 ? 1 : -1));
+      await el.pressSequentially(wrongKey, { delay: randBetween(55, 130) });
+      await page.waitForTimeout(randBetween(80, 180));
+      await page.keyboard.press('Backspace');
+      await page.waitForTimeout(randBetween(100, 250));
+    }
+
+    // Slower at word boundaries (@, .), faster in the middle
+    const isWordBoundary = char === ' ' || char === '@' || char === '.' || i === 0 || i === text.length - 1;
+    const delay = isWordBoundary ? randBetween(120, 220) : randBetween(55, 145);
+    await el.pressSequentially(char, { delay });
+
+    // ~7% chance of a brief mid-typing pause
+    if (Math.random() < 0.07) {
+      await page.waitForTimeout(randBetween(300, 700));
+    }
+  }
+}
+
+// Detect if we're on a login page
+function isLoginPage(url) {
+  return url.includes('/login') || url.includes('/signin');
+}
+
+// Check current page and login if needed — safe to call at any point
+async function ensureLoggedIn(page, email, password, jobId) {
+  if (!email || !password) return;
+  if (isLoginPage(page.url())) {
+    console.log('[Auto-login] Login page detected — logging in now.');
+    await loginWithGoogle(page, email, password, jobId);
+  }
+}
+
+// Human-like login using ContactOut's own email/password form
+async function loginWithGoogle(page, email, password, jobId) {
+  console.log(`[Auto-login] Starting ContactOut form login for: ${email}`);
+
+  // Wait for the email field to be visible and ready
+  await page.waitForSelector('input[type="email"]', { state: 'visible', timeout: 15000 });
+  console.log('[Auto-login] Login form is visible.');
+
+  // Pause like a person reading the page
+  await page.waitForTimeout(randBetween(1200, 2200));
+
+  // Click email field, pause, then type character by character
+  await page.click('input[type="email"]');
+  await page.waitForTimeout(randBetween(300, 600));
+  for (const char of email) {
+    await page.type('input[type="email"]', char, { delay: randBetween(60, 150) });
+    if (Math.random() < 0.06) await page.waitForTimeout(randBetween(200, 500));
+  }
+  console.log('[Auto-login] Email typed.');
+
+  // Pause before moving to password
+  await page.waitForTimeout(randBetween(700, 1300));
+
+  // Click password field, pause, then type
+  await page.click('input[type="password"]');
+  await page.waitForTimeout(randBetween(300, 600));
+  for (const char of password) {
+    await page.type('input[type="password"]', char, { delay: randBetween(60, 150) });
+    if (Math.random() < 0.06) await page.waitForTimeout(randBetween(200, 500));
+  }
+  console.log('[Auto-login] Password typed.');
+
+  // Pause before clicking Login — like double-checking
+  await page.waitForTimeout(randBetween(800, 1500));
+
+  // Click the Login button
+  await page.click('button[type="submit"]');
+  console.log('[Auto-login] Clicked Login. Waiting for redirect...');
+
+  // Wait for redirect — could go to /login/verify/... or straight to dashboard
+  await page.waitForTimeout(3000);
+  const urlAfterLogin = page.url();
+  console.log(`[Auto-login] URL after submit: ${urlAfterLogin}`);
+
+  if (urlAfterLogin.includes('/login/verify')) {
+    console.log('[Auto-login] Verification code required. Waiting for code from UI...');
+    await handleVerifyCode(page, jobId);
+  } else if (urlAfterLogin.includes('/login')) {
+    console.log('[Auto-login] Still on login page — credentials may be wrong.');
+  } else {
+    console.log('[Auto-login] Login successful — redirected to dashboard.');
+  }
+
+  await page.waitForTimeout(randBetween(1500, 2500));
+  console.log('[Auto-login] Login flow complete.');
+}
+
+// Wait for the user to submit a verify code via the UI, then fill it into the 6 boxes
+async function handleVerifyCode(page, jobId) {
+  const verifySignalPath = path.join(__dirname, 'outputs', `${jobId}.verify`);
+  const verifyCodePath   = path.join(__dirname, 'outputs', `${jobId}.verifycode`);
+
+  // Write the signal file so the UI knows to show the code input box
+  fs.writeFileSync(verifySignalPath, '');
+  console.log('[Verify] Waiting for user to enter code in UI...');
+
+  // Poll for the code file (written by the server when user submits)
+  let code = null;
+  for (let i = 0; i < 120; i++) { // wait up to 2 minutes
+    if (fs.existsSync(verifyCodePath)) {
+      code = fs.readFileSync(verifyCodePath, 'utf8').trim();
+      fs.unlinkSync(verifyCodePath);
+      break;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  // Remove the signal file regardless
+  try { fs.unlinkSync(verifySignalPath); } catch (e) {}
+
+  if (!code || code.length !== 6) {
+    console.log('[Verify] No valid code received. Skipping verify step.');
+    return;
+  }
+
+  console.log(`[Verify] Got code: ${code}. Filling into verify boxes...`);
+
+  // Fill each digit into its own input box
+  const boxes = page.locator('input.email-code');
+  const count = await boxes.count();
+  for (let i = 0; i < Math.min(code.length, count); i++) {
+    await boxes.nth(i).click();
+    await page.waitForTimeout(randBetween(80, 180));
+    await boxes.nth(i).type(code[i], { delay: randBetween(60, 130) });
+    await page.waitForTimeout(randBetween(60, 150));
+  }
+
+  await page.waitForTimeout(randBetween(500, 900));
+  await page.click('#verify');
+  console.log('[Verify] Clicked Verify button. Waiting for redirect...');
+
+  try {
+    await page.waitForURL(url => !url.includes('/login'), { timeout: 15000 });
+    console.log('[Verify] Verification successful.');
+  } catch (e) {
+    console.log('[Verify] Still on verify page — code may have been wrong.');
+  }
 }
 
 async function waitForStartSignal(jobId) {
@@ -125,10 +324,26 @@ const sheetsHelper = SHEET_MODE ? require('./google-sheets-helper') : null;
   };
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: IS_HEADLESS,
-    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox',
+      '--restore-last-session=false',   // don't restore previous session
+      '--no-session-restore',
+      '--hide-crash-restore-bubble',    // suppress "restore pages?" bubble
+    ],
     ...browserContextOptions
   });
-  const page = await context.newPage();
+
+  // Close any extra pages that Chrome opens on restore (about:blank tabs etc.)
+  const existingPages = context.pages();
+  const page = existingPages.length > 0 ? existingPages[existingPages.length - 1] : await context.newPage();
+
+  // Dismiss any native "restore session" dialog that may appear
+  page.on('dialog', async dialog => {
+    console.log(`[Browser] Dismissing dialog: ${dialog.message()}`);
+    await dialog.dismiss();
+  });
+
   page.setDefaultTimeout(60000);
 
   if (COOKIES_STRING) {
@@ -141,9 +356,30 @@ const sheetsHelper = SHEET_MODE ? require('./google-sheets-helper') : null;
   }
 
   const initialUrl = SEARCH_PAGE_URL || 'https://contactout.com/dashboard/search';
-  await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
-  if (MANUAL_LOGIN) {
+
+  if (ACCOUNT_EMAIL && ACCOUNT_PASSWORD) {
+    console.log(`[Auto-login] Navigating to login page...`);
+    await page.goto('https://contactout.com/login', { waitUntil: 'domcontentloaded' });
+    // Wait for the page to fully settle (dismiss any restore bubble first)
+    await page.waitForTimeout(3000);
+    const currentUrl = page.url();
+    console.log(`[Auto-login] Current URL: ${currentUrl}`);
+    if (isLoginPage(currentUrl)) {
+      try {
+        await loginWithGoogle(page, ACCOUNT_EMAIL, ACCOUNT_PASSWORD, jobId);
+      } catch (loginErr) {
+        console.error(`[Auto-login] Login threw an error: ${loginErr.message}`);
+        console.error(loginErr.stack);
+      }
+    } else {
+      console.log('[Auto-login] Already logged in, navigating to search page.');
+    }
+    await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
+  } else if (MANUAL_LOGIN) {
+    await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
     await waitForStartSignal(jobId);
+  } else {
+    await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
   }
 
   try {
@@ -151,11 +387,19 @@ const sheetsHelper = SHEET_MODE ? require('./google-sheets-helper') : null;
     await page.waitForSelector(NAME_INPUT_SELECTOR, { state: 'visible', timeout: 15000 });
     console.log('Login verified. Starting job...');
   } catch (e) {
-    console.error('Pre-flight check failed. The search input form was not visible.');
-    const errorHtmlPath = path.join(__dirname, 'outputs', `${jobId}-pre-flight-error.html`);
-    fs.writeFileSync(errorHtmlPath, await page.content());
-    console.error(`Saved a snapshot of the page to ${errorHtmlPath}`);
-    throw new Error('Login failed or search form not found on page. Please check your cookies or manual login.');
+    // Search form not visible — might have been redirected to login mid-session
+    console.log('Pre-flight check failed — checking if login page appeared...');
+    await ensureLoggedIn(page, ACCOUNT_EMAIL, ACCOUNT_PASSWORD, jobId);
+    await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });
+    // One more attempt
+    try {
+      await page.waitForSelector(NAME_INPUT_SELECTOR, { state: 'visible', timeout: 15000 });
+      console.log('Login recovered. Starting job...');
+    } catch (e2) {
+      const errorHtmlPath = path.join(__dirname, 'outputs', `${jobId}-pre-flight-error.html`);
+      fs.writeFileSync(errorHtmlPath, await page.content());
+      throw new Error('Login failed or search form not found. Snapshot saved to outputs folder.');
+    }
   }
 
   // CSV writer setup (CSV mode only)
