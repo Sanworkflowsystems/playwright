@@ -3,63 +3,132 @@
 /**
  * Prospeo enrichment client.
  *
- * Single:  POST https://api.prospeo.io/enrich-person
- * Bulk:    POST https://api.prospeo.io/bulk-enrich-person  (max 50 contacts per call)
+ * Single: POST https://api.prospeo.io/enrich-person
+ * Bulk:   POST https://api.prospeo.io/bulk-enrich-person
  *
- * Auth: X-KEY header
+ * API notes:
+ * - Bulk accepts up to 50 people per request.
+ * - Bulk requires an identifier on each input record so results can be mapped
+ *   back to the original row.
+ * - Send every reliable datapoint we have. Prospeo explicitly recommends
+ *   linkedin_url plus company_website/company_linkedin_url for accuracy.
+ * - only_verified_email=true prevents spending credits on unverified emails.
  */
 
 const PROSPEO_BASE = 'https://api.prospeo.io';
 const SINGLE_TIMEOUT_MS = 20000;
-const BULK_TIMEOUT_MS   = 90000;  // bulk can take longer
+const BULK_TIMEOUT_MS = 90000;
 
-/**
- * Build a Prospeo contact object from options.
- * Prefers LinkedIn URL; falls back to name + company.
- */
-function buildContactPayload(opts) {
-  if (opts.linkedinUrl && opts.linkedinUrl.startsWith('http')) {
-    return { url: opts.linkedinUrl };
-  }
-  return {
-    first_name: opts.firstName || '',
-    last_name:  opts.lastName  || '',
-    company:    opts.company   || '',
-  };
+function cleanString(value) {
+  return value == null ? '' : String(value).trim();
 }
 
-/**
- * Parse a raw Prospeo result object → { email, confidence } or null
- */
+function normalizeWebsite(value) {
+  const raw = cleanString(value);
+  if (!raw || raw.includes('linkedin.com')) return '';
+  return raw.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/.*$/, '');
+}
+
+// Prospeo only accepts slug-based company URLs, not numeric company IDs.
+// /company/68912117 → rejected (INVALID_DATAPOINTS); /company/snitch-com → accepted.
+function isSlugCompanyUrl(url) {
+  if (!url) return false;
+  const match = url.match(/\/company\/([^/?#]+)/);
+  if (!match) return false;
+  return /[a-zA-Z]/.test(match[1]);
+}
+
+function hasMinimumDatapoints(payload) {
+  if (payload.linkedin_url || payload.email || payload.person_id) return true;
+  if (payload.first_name && payload.last_name && (payload.company_name || payload.company_website || payload.company_linkedin_url)) return true;
+  if (payload.full_name && (payload.company_name || payload.company_website || payload.company_linkedin_url)) return true;
+  return false;
+}
+
+function buildContactPayload(opts = {}, identifier) {
+  const payload = {};
+
+  if (identifier !== undefined) payload.identifier = String(identifier);
+
+  const linkedinUrl = cleanString(opts.linkedinUrl);
+  const companyLinkedinUrl = cleanString(opts.companyLinkedinUrl);
+  const companyWebsite = normalizeWebsite(opts.companyWebsite);
+  const firstName = cleanString(opts.firstName);
+  const lastName = cleanString(opts.lastName);
+  const fullName = cleanString(opts.fullName || [firstName, lastName].filter(Boolean).join(' '));
+  const company = cleanString(opts.company);
+  const email = cleanString(opts.email);
+
+  // Only send proper public /in/ profile URLs — normalize to www. and reject Sales Navigator
+  const normalizedLinkedin = linkedinUrl
+    ? linkedinUrl.replace(/^https?:\/\/(www\.)?linkedin\.com/i, 'https://www.linkedin.com')
+    : '';
+  if (normalizedLinkedin && normalizedLinkedin.includes('/in/')) {
+    payload.linkedin_url = normalizedLinkedin;
+  }
+  if (email && email.includes('@')) payload.email = email;
+  if (firstName) payload.first_name = firstName;
+  if (lastName) payload.last_name = lastName;
+  if (fullName) payload.full_name = fullName;
+  if (company) payload.company_name = company;
+  if (companyWebsite) payload.company_website = companyWebsite;
+  if (companyLinkedinUrl && companyLinkedinUrl.includes('linkedin.com') && isSlugCompanyUrl(companyLinkedinUrl)) {
+    payload.company_linkedin_url = companyLinkedinUrl;
+  }
+
+  return payload;
+}
+
 function parseResult(raw) {
   if (!raw) return null;
-  const email = raw?.email?.value || (typeof raw.email === 'string' ? raw.email : null);
-  if (!email || !email.includes('@')) return null;
+
+  const emailObj = raw?.person?.email || raw?.email || null;
+  const email = cleanString(emailObj?.email || emailObj?.value || raw?.email);
+
+  if (!email || !email.includes('@') || email.includes('*')) return null;
+
   return {
-    email: email.toLowerCase().trim(),
-    confidence: raw?.email?.confidence ?? null,
+    email: email.toLowerCase(),
+    confidence: emailObj?.confidence ?? null,
+    status: emailObj?.status ?? null,
   };
 }
 
-/**
- * Enrich a single person (LinkedIn URL or name+company).
- *
- * @param {{ linkedinUrl?, firstName?, lastName?, company? }} opts
- * @param {string} apiKey
- * @returns {{ email: string, confidence: number|null }} or null
- */
+async function parseErrorResponse(res, label) {
+  let body = '';
+  try {
+    body = await res.text();
+  } catch (_) {
+    body = '';
+  }
+
+  let errorCode = '';
+  try {
+    errorCode = JSON.parse(body).error_code || '';
+  } catch (_) {
+    errorCode = '';
+  }
+
+  const e = new Error(`${label}: HTTP ${res.status}${errorCode ? ` ${errorCode}` : ''}${body ? ` - ${body.slice(0, 200)}` : ''}`);
+  e.statusCode = res.status;
+  e.errorCode = errorCode;
+  throw e;
+}
+
 async function enrichSingle(opts, apiKey) {
-  const body = buildContactPayload(opts);
+  const payload = buildContactPayload(opts);
+  if (!hasMinimumDatapoints(payload)) return null;
 
   let res;
   try {
     res = await fetch(`${PROSPEO_BASE}/enrich-person`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-KEY': apiKey,
-      },
-      body: JSON.stringify(body),
+      headers: { 'Content-Type': 'application/json', 'X-KEY': apiKey },
+      body: JSON.stringify({
+        only_verified_email: true,
+        enrich_mobile: false,
+        data: payload,
+      }),
       signal: AbortSignal.timeout(SINGLE_TIMEOUT_MS),
     });
   } catch (err) {
@@ -68,40 +137,66 @@ async function enrichSingle(opts, apiKey) {
     throw e;
   }
 
-  if (res.status === 429) { const e = new Error('Prospeo: rate limited (429)'); e.statusCode = 429; throw e; }
-  if (res.status === 402) { const e = new Error('Prospeo: quota exhausted (402)'); e.statusCode = 402; throw e; }
+  if (res.status === 429) {
+    const e = new Error('Prospeo: rate limited (429)');
+    e.statusCode = 429;
+    throw e;
+  }
+  if (res.status === 401) {
+    const e = new Error('Prospeo: invalid API key (401)');
+    e.statusCode = 401;
+    throw e;
+  }
+  if (res.status === 402) {
+    const e = new Error('Prospeo: insufficient credits/quota exhausted (402)');
+    e.statusCode = 402;
+    throw e;
+  }
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    const e = new Error(`Prospeo single: HTTP ${res.status} — ${body.slice(0, 200)}`);
+    let body = '';
+    try { body = await res.text(); } catch (_) {}
+    let parsed = {};
+    try { parsed = JSON.parse(body); } catch (_) {}
+    const errorCode = parsed.error_code || '';
+    // NO_MATCH / INVALID_DATAPOINTS = expected "no result" 400s — treat as no-match
+    if (res.status === 400 && parsed.error === true) return null;
+    const e = new Error(`Prospeo single: HTTP ${res.status}${errorCode ? ` ${errorCode}` : ''} - ${body.slice(0, 200)}`);
     e.statusCode = res.status;
+    e.errorCode = errorCode;
     throw e;
   }
 
   const data = await res.json();
+  if (data.error) return null;
   return parseResult(data);
 }
 
-/**
- * Bulk enrich up to 50 contacts in a single API call.
- *
- * @param {Array<{ linkedinUrl?, firstName?, lastName?, company? }>} contacts  — max 50
- * @param {string} apiKey
- * @returns {Array<{ email, confidence }|null>}  — same length & order as input
- */
 async function enrichBulk(contacts, apiKey) {
-  if (!contacts || contacts.length === 0) return [];
+  if (!Array.isArray(contacts) || contacts.length === 0) return [];
+  if (contacts.length > 50) {
+    throw new Error(`Prospeo bulk accepts max 50 contacts; got ${contacts.length}`);
+  }
 
-  const payload = contacts.map(buildContactPayload);
+  const payload = contacts.map((opts, idx) => buildContactPayload(opts, idx));
+  const invalidIndexes = new Set();
+  const validPayload = payload.filter((item, idx) => {
+    const valid = hasMinimumDatapoints(item);
+    if (!valid) invalidIndexes.add(idx);
+    return valid;
+  });
+
+  if (validPayload.length === 0) return contacts.map(() => null);
 
   let res;
   try {
     res = await fetch(`${PROSPEO_BASE}/bulk-enrich-person`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-KEY': apiKey,
-      },
-      body: JSON.stringify({ contacts: payload }),
+      headers: { 'Content-Type': 'application/json', 'X-KEY': apiKey },
+      body: JSON.stringify({
+        only_verified_email: true,
+        enrich_mobile: false,
+        data: validPayload,
+      }),
       signal: AbortSignal.timeout(BULK_TIMEOUT_MS),
     });
   } catch (err) {
@@ -110,24 +205,46 @@ async function enrichBulk(contacts, apiKey) {
     throw e;
   }
 
-  if (res.status === 429) { const e = new Error('Prospeo bulk: rate limited (429)'); e.statusCode = 429; throw e; }
-  if (res.status === 402) { const e = new Error('Prospeo bulk: quota exhausted (402)'); e.statusCode = 402; throw e; }
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    const e = new Error(`Prospeo bulk: HTTP ${res.status} — ${body.slice(0, 200)}`);
-    e.statusCode = res.status;
+  if (res.status === 429) {
+    const e = new Error('Prospeo bulk: rate limited (429)');
+    e.statusCode = 429;
+    throw e;
+  }
+  if (res.status === 401) {
+    const e = new Error('Prospeo bulk: invalid API key (401)');
+    e.statusCode = 401;
+    throw e;
+  }
+  if (res.status === 402) {
+    const e = new Error('Prospeo bulk: insufficient credits/quota exhausted (402)');
+    e.statusCode = 402;
+    throw e;
+  }
+  if (!res.ok) await parseErrorResponse(res, 'Prospeo bulk');
+
+  const data = await res.json();
+  if (data.error) {
+    const e = new Error(`Prospeo bulk API error: ${data.error_code || 'unknown'}`);
+    e.statusCode = 400;
+    e.errorCode = data.error_code || '';
     throw e;
   }
 
-  const data = await res.json();
+  const byIdentifier = new Map();
+  for (const match of data.matched || []) {
+    const parsed = parseResult(match);
+    if (parsed) byIdentifier.set(String(match.identifier), parsed);
+  }
 
-  // Prospeo bulk returns results array in same order as input
-  const rawResults = Array.isArray(data) ? data : (data.results || data.data || []);
-
-  // Pad to match input length (defensive)
-  while (rawResults.length < contacts.length) rawResults.push(null);
-
-  return rawResults.map(r => parseResult(r));
+  return contacts.map((_, idx) => {
+    if (invalidIndexes.has(idx)) return null;
+    return byIdentifier.get(String(idx)) || null;
+  });
 }
 
-module.exports = { enrichSingle, enrichBulk, buildContactPayload };
+module.exports = {
+  enrichSingle,
+  enrichBulk,
+  buildContactPayload,
+  hasMinimumDatapoints,
+};

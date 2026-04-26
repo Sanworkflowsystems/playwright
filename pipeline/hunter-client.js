@@ -4,69 +4,61 @@
  * Hunter.io email finder client.
  * GET https://api.hunter.io/v2/email-finder
  *
- * Auth: api_key query param
+ * Rate limits: 15 req/s, 500 req/min per key.
+ * HTTP 403 = per-second/per-minute rate limit hit.
+ * HTTP 429 = monthly quota exhausted.
  */
 
 const HUNTER_BASE = 'https://api.hunter.io/v2';
-const TIMEOUT_MS = 20000;
-
-// Company name suffixes to strip when deriving domain
-const STRIP_SUFFIXES = new Set([
-  'inc', 'incorporated', 'llc', 'ltd', 'limited', 'corp', 'corporation',
-  'co', 'company', 'group', 'holdings', 'international', 'intl',
-  'technologies', 'technology', 'tech', 'solutions', 'services', 'global',
-  'consulting', 'partners', 'ventures', 'enterprises', 'systems', 'software',
-  'digital', 'media', 'agency', 'studio', 'labs', 'lab', 'ai', 'io',
-  'gmbh', 'ag', 'bv', 'srl', 'sarl', 'sa', 'pty', 'pvt',
-]);
+const TIMEOUT_MS  = 25000; // max_duration=20 + network headroom
+const MAX_DURATION = '20'; // gives Hunter more time to refine results
 
 /**
- * Derive a best-guess domain from a company name.
- * e.g. "EMCD Tech Ltd." → "emcdtech.com"
- *      "Workflow Systems Inc" → "workflowsystems.com"
- * Returns null if no valid domain can be derived.
+ * Extract the LinkedIn vanity handle from a profile URL.
+ * https://linkedin.com/in/john-doe-123 → "john-doe-123"
+ * Returns null for VMID-style URLs (all digits/alphanumeric without hyphens = not a vanity slug).
  */
-function companyToDomain(company) {
-  if (!company || typeof company !== 'string') return null;
-
-  // Remove everything after common separators (parens, pipes, slashes)
-  let cleaned = company.split(/[|()/\\–—]/)[0];
-
-  // Lowercase, remove non-alphanumeric except spaces
-  cleaned = cleaned.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
-
-  if (!cleaned) return null;
-
-  // Split into words, remove trailing suffixes
-  const words = cleaned.split(/\s+/).filter(Boolean);
-  while (words.length > 1 && STRIP_SUFFIXES.has(words[words.length - 1])) {
-    words.pop();
-  }
-
-  const domain = words.join('');
-  if (!domain || domain.length < 2) return null;
-
-  return `${domain}.com`;
+function extractLinkedinHandle(url) {
+  if (!url) return null;
+  const m = url.match(/linkedin\.com\/in\/([^/?#]+)/i);
+  if (!m) return null;
+  const handle = m[1].replace(/\/$/, '');
+  // VMID handles are pure alphanumeric with no hyphens — Hunter needs vanity slugs
+  if (/^[A-Za-z0-9]+$/.test(handle) && handle.length > 20) return null;
+  return handle || null;
 }
 
 /**
- * Find an email for a person at a given domain.
+ * Find an email via Hunter.
  *
- * @param {string} firstName
- * @param {string} lastName
- * @param {string} domain   — e.g. "acme.com"
+ * @param {object} opts
+ *   firstName, lastName, company, linkedinUrl
  * @param {string} apiKey
- * @returns {{ email: string, confidence: number|null }} or null
  */
-async function findEmail(firstName, lastName, domain, apiKey) {
-  if (!domain) return null;
+async function findEmail(opts, apiKey) {
+  const firstName    = (opts.firstName    || '').trim();
+  const lastName     = (opts.lastName     || '').trim();
+  const company      = (opts.company      || '').trim();
+  const linkedinUrl  = (opts.linkedinUrl  || '').trim();
 
-  const params = new URLSearchParams({
-    first_name: firstName || '',
-    last_name:  lastName  || '',
-    domain,
-    api_key: apiKey,
-  });
+  const linkedinHandle = extractLinkedinHandle(linkedinUrl);
+
+  // Hunter requires: (domain OR company OR linkedin_handle) AND (name OR linkedin_handle)
+  const hasIdentifier = company || linkedinHandle;
+  const hasName       = (firstName && lastName) || linkedinHandle;
+  if (!hasIdentifier || !hasName) return null;
+
+  const params = new URLSearchParams({ api_key: apiKey });
+
+  // Always pass company — Hunter's own resolution is more accurate than our domain guess.
+  // Do not pass a guessed domain alongside company: Hunter docs say domain takes precedence
+  // and a wrong guess would block Hunter's own lookup.
+  if (company)        params.set('company', company);
+  if (firstName)      params.set('first_name', firstName);
+  if (lastName)       params.set('last_name', lastName);
+  if (linkedinHandle) params.set('linkedin_handle', linkedinHandle);
+
+  params.set('max_duration', MAX_DURATION);
 
   let res;
   try {
@@ -79,13 +71,24 @@ async function findEmail(firstName, lastName, domain, apiKey) {
     throw e;
   }
 
-  if (res.status === 429) { const e = new Error('Hunter: rate limited (429)'); e.statusCode = 429; throw e; }
-  if (res.status === 402) { const e = new Error('Hunter: quota exhausted (402)'); e.statusCode = 402; throw e; }
-  if (res.status === 404) return null;  // no result found — not an error
+  // 403 = per-second/per-minute rate limit (docs: "You have reached the rate limit")
+  if (res.status === 403) {
+    const e = new Error('Hunter: rate limited (403)');
+    e.statusCode = 429; // normalise to 429 so KeyPool cooldown logic fires
+    throw e;
+  }
+  // 429 = monthly usage quota exhausted
+  if (res.status === 429) {
+    const e = new Error('Hunter: monthly quota exhausted (429)');
+    e.statusCode = 402; // normalise to 402 so KeyPool marks daily-pause
+    throw e;
+  }
+  if (res.status === 404) return null;
+  if (res.status === 451) return null; // legal opt-out — treat as no result
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    const e = new Error(`Hunter: HTTP ${res.status} — ${body.slice(0, 200)}`);
+    const e = new Error(`Hunter: HTTP ${res.status} - ${body.slice(0, 200)}`);
     e.statusCode = res.status;
     throw e;
   }
@@ -95,9 +98,10 @@ async function findEmail(firstName, lastName, domain, apiKey) {
   if (!email || !email.includes('@')) return null;
 
   return {
-    email: email.toLowerCase().trim(),
+    email:      email.toLowerCase().trim(),
     confidence: data?.data?.score ?? null,
+    status:     data?.data?.verification?.status ?? null,
   };
 }
 
-module.exports = { findEmail, companyToDomain };
+module.exports = { findEmail, extractLinkedinHandle };

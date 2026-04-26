@@ -9,16 +9,17 @@ const DEFAULTS = {
   prospeo: {
     keys:               [],
     cooldownMs:         60000,   // pause key 60s on 429
-    dailyLimit:         0,       // 0 = unlimited
-    requestsPerSecond:  5,       // starter plan; raise for higher plans
+    dailyLimit:         50,      // Prospeo enrich limit counts submitted records
+    minuteLimit:        5,       // Prospeo enrich minute limit counts submitted records
+    requestsPerSecond:  1,
     enabled:            true,
-    bulkSize:           50,      // contacts per bulk call (Prospeo max)
+    bulkSize:           5,
   },
   hunter: {
     keys:               [],
     cooldownMs:         60000,
     dailyLimit:         0,
-    requestsPerSecond:  10,
+    requestsPerSecond:  1,
     enabled:            true,
   },
   bouncer: {
@@ -31,7 +32,7 @@ const DEFAULTS = {
   pipeline: {
     maxRetries:           3,
     skipIfEmailExists:    true,   // skip rows that already have enrichment_email
-    acceptRiskyEmails:    true,   // treat Bouncer "risky" as valid
+    acceptRiskyEmails:    false,  // reject Bouncer "risky" — only "deliverable" is accepted
   },
 };
 

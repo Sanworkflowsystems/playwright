@@ -141,6 +141,66 @@
         Enable Pre-Enrichment Pipeline &nbsp;
         <span style="font-weight:normal;font-size:0.85em;color:#555">(Prospeo → Hunter → Bouncer, then ContactOut for misses)</span>
       </label>
+      <div style="margin-top:0.4em;padding-left:1.4em;">
+        <label style="font-weight:normal;font-size:0.88em;">
+          <input type="checkbox" id="skipProspeoPhase" />
+          Skip Prospeo (resume with Hunter + Bouncer only)
+        </label>
+        <div class="pipeline-hint" style="margin-left:1.4em;">Use this if Prospeo already ran on the sheet and you only need to fill the remaining blanks via Hunter.</div>
+      </div>
+      <div style="margin-top:0.6em;padding-left:1.4em;">
+        <label style="font-weight:normal;font-size:0.88em;">
+          Row range:
+          <input type="number" id="rowStart" min="2" placeholder="2" style="width:80px;padding:0.2em 0.4em;margin:0 0.3em;" />
+          to
+          <input type="number" id="rowEnd" min="2" placeholder="e.g. 100" style="width:90px;padding:0.2em 0.4em;margin-left:0.3em;" />
+        </label>
+        <div class="pipeline-hint" style="margin-left:1.4em;">1-based sheet row numbers (row 1 = headers). Applies to Prospeo, Hunter, Bouncer, AND ContactOut. Leave blank to process all rows.</div>
+      </div>
+    </div>
+
+    <!-- ContactOut-only mode info (pipeline OFF + Sheets mode) -->
+    <div id="contactoutOnlyPanel" style="margin:0.6em 0 1em 0;padding:0.8em 1em;background:#fff7ed;border:1px solid #fb923c;border-radius:8px;">
+      <div style="font-weight:bold;color:#9a3412;font-size:0.95em;margin-bottom:0.3em;">ContactOut-only mode</div>
+      <div style="font-size:0.85em;color:#555;">
+        Pipeline is OFF — rows will go straight to ContactOut in the browser. The row range above applies.
+        Rows that already have a value in the <code>finalEmail</code> column are skipped automatically.
+      </div>
+    </div>
+
+    <!-- AnyMailFinder toggle -->
+    <div id="amfToggleRow" style="margin:0.8em 0 0.4em 0;">
+      <label style="display:flex;align-items:center;gap:0.5em;font-size:1em;font-weight:bold;cursor:pointer;">
+        <input type="checkbox" id="amfEnabled" style="width:16px;height:16px;cursor:pointer;" />
+        Enable AnyMailFinder mode
+        <span style="font-weight:normal;font-size:0.85em;color:#555;">(LinkedIn URL → email, no browser needed)</span>
+      </label>
+    </div>
+
+    <!-- AnyMailFinder panel (shown when toggle is on) -->
+    <div id="amfPanel" style="display:none;margin:0.4em 0 1em 0;padding:1em 1.2em;background:#f5f0ff;border:1px solid #a78bfa;border-radius:8px;">
+      <div style="font-weight:bold;color:#5b21b6;font-size:0.95em;margin-bottom:0.6em;">AnyMailFinder Settings</div>
+      <div style="margin-bottom:0.7em;">
+        <label style="font-size:0.9em;font-weight:bold;display:block;margin-bottom:0.2em;">API Key</label>
+        <input type="text" id="amfApiKey" placeholder="your-anymailfinder-api-key" style="width:100%;max-width:420px;padding:0.35em 0.5em;font-family:monospace;font-size:0.9em;border:1px solid #bbb;border-radius:4px;" />
+        <div style="font-size:0.78em;color:#666;margin-top:0.2em;">Uses <code>defaultProfileUrl</code> column as LinkedIn URL. Writes valid emails to <code>finalEmail</code>. Rows already in <code>finalEmail</code> are skipped. Row range above applies.</div>
+      </div>
+      <button id="startAmfBtn" onclick="startAnyMailFinder()" style="padding:0.45em 1.3em;background:#7c3aed;color:white;border:none;border-radius:4px;cursor:pointer;font-size:0.95em;font-weight:bold;">Start AnyMailFinder</button>
+
+      <!-- Live progress -->
+      <div id="amfProgress" style="display:none;margin-top:1em;">
+        <div id="amfStatusLine" style="font-size:0.9em;font-weight:bold;margin-bottom:0.4em;color:#333;">Starting...</div>
+        <div style="width:100%;background:#e0e0e0;border-radius:6px;height:18px;overflow:hidden;max-width:420px;">
+          <div id="amfProgressBar" style="height:100%;width:0%;background:#7c3aed;border-radius:6px;text-align:center;font-size:0.75em;line-height:18px;color:white;transition:width 0.4s;white-space:nowrap;">0%</div>
+        </div>
+        <div style="margin-top:0.4em;font-size:0.82em;color:#555;">
+          Found: <strong id="amfFound">0</strong> &nbsp;|&nbsp;
+          Not found: <strong id="amfNotFound">0</strong> &nbsp;|&nbsp;
+          Credits used: <strong id="amfCredits">0</strong>
+        </div>
+        <div id="amfStopRow" style="display:none;margin-top:0.5em;padding:0.5em 0.8em;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;font-size:0.85em;color:#92400e;"></div>
+        <button id="stopAmfBtn" onclick="stopAnyMailFinder()" style="margin-top:0.5em;padding:0.3em 1em;background:#e53935;color:white;border:none;border-radius:4px;cursor:pointer;font-size:0.85em;">Stop</button>
+      </div>
     </div>
 
     <!-- Pipeline API keys panel (shown when toggle is on) -->

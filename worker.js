@@ -299,6 +299,38 @@ if (SHEET_MODE) {
 
 const sheetsHelper = SHEET_MODE ? require('./google-sheets-helper') : null;
 
+// Bouncer verifier (sheet mode only) — sequential priority-based finalEmail selection
+let verifier = null;
+function initVerifier(headers, activeSheetName) {
+  if (!SHEET_MODE) return;
+  try {
+    const { loadConfig } = require('./pipeline/pipeline-config');
+    const { createVerifier } = require('./pipeline/contactout-verifier');
+    const cfg = loadConfig();
+    const bouncerKey = (cfg.bouncer && cfg.bouncer.enabled && (cfg.bouncer.keys || [])[0]) || null;
+
+    const finalEmailIdx = headers.indexOf('finalEmail');
+    const finalEmailCol = finalEmailIdx >= 0 ? sheetsHelper.columnLetter(finalEmailIdx) : null;
+    if (!finalEmailCol) {
+      console.log('[Verifier] finalEmail column not found in sheet — skipping verification.');
+      return;
+    }
+
+    verifier = createVerifier({
+      bouncerKey,
+      sheetsClient,
+      sheetId: SHEET_ID,
+      sheetName: activeSheetName,
+      finalEmailCol,
+      bouncerEnabled: !!bouncerKey,
+    });
+    console.log(`[Verifier] Ready. Bouncer ${bouncerKey ? 'enabled' : 'disabled (fallback mode)'} | finalEmail col=${finalEmailCol}`);
+  } catch (err) {
+    console.error(`[Verifier] Init failed: ${err.message} — continuing without verification.`);
+    verifier = null;
+  }
+}
+
 (async () => {
   let rows, headers;
   let activeSheetName = SHEET_NAME;
@@ -317,6 +349,8 @@ const sheetsHelper = SHEET_MODE ? require('./google-sheets-helper') : null;
 
   const processedColIndex = headers.indexOf('contactout_processed');
   const processedColLetter = processedColIndex >= 0 ? sheetsHelper.columnLetter(processedColIndex) : null;
+
+  initVerifier(headers, activeSheetName);
 
   const browserContextOptions = {
     viewport: { width: 1280, height: 800 },
@@ -583,6 +617,16 @@ const sheetsHelper = SHEET_MODE ? require('./google-sheets-helper') : null;
       await sheetsHelper.updateSheetRow(sheetsClient, SHEET_ID, activeSheetName, sheetRowNumber, headers, row);
       await sheetsHelper.markRowProcessed(sheetsClient, SHEET_ID, activeSheetName, sheetRowNumber, processedColLetter);
       console.log(`Row ${i + 1} written to Google Sheet.`);
+
+      // Fire-and-forget Bouncer verification → finalEmail (non-blocking, sequential per worker)
+      if (verifier) {
+        verifier.enqueue(sheetRowNumber, {
+          workEmail:            row['Work Email'] || '',
+          otherWorkEmails:      row['Other Work Emails'] || '',
+          personalEmail:        row['Personal Email'] || '',
+          otherPersonalEmails:  row['Other Personal Emails'] || '',
+        });
+      }
     } else {
       await csvWriter.writeRecords([row]);
     }
@@ -596,6 +640,15 @@ const sheetsHelper = SHEET_MODE ? require('./google-sheets-helper') : null;
   await context.close();
 
   if (SHEET_MODE) {
+    if (verifier) {
+      const pending = verifier.stats();
+      if (pending.queued > 0 || pending.running) {
+        console.log(`[Verifier] Waiting for ${pending.queued} pending verifications to finish...`);
+      }
+      await verifier.drain();
+      const final = verifier.stats();
+      console.log(`[Verifier] Done. verified=${final.verified} deliverable=${final.deliverable} rejected=${final.rejected} fallback=${final.fallback} blank=${final.blank} errors=${final.errors}`);
+    }
     console.log('Worker finished. Results written to Google Sheet.');
   } else {
     console.log('Worker finished, output saved to', outputPath);

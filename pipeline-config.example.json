@@ -6,10 +6,11 @@
       "YOUR_PROSPEO_KEY_3"
     ],
     "cooldownMs": 60000,
-    "dailyLimit": 0,
-    "requestsPerSecond": 5,
+    "dailyLimit": 50,
+    "minuteLimit": 20,
+    "requestsPerSecond": 1,
     "enabled": true,
-    "bulkSize": 50
+    "bulkSize": 10
   },
   "hunter": {
     "keys": [
@@ -33,6 +34,6 @@
   "pipeline": {
     "maxRetries": 3,
     "skipIfEmailExists": true,
-    "acceptRiskyEmails": true
+    "acceptRiskyEmails": false
   }
 }

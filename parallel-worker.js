@@ -222,12 +222,48 @@ async function processJob(page, spec, batchId, allJobStates) {
   const processedColIndex = headers.indexOf('contactout_processed');
   const processedColLetter = processedColIndex >= 0 ? sheetsHelper?.columnLetter(processedColIndex) : null;
 
+  // Bouncer verifier (sheet mode only) — sequential priority-based finalEmail selection.
+  let verifier = null;
+  if (SHEET_MODE) {
+    try {
+      const { loadConfig } = require('./pipeline/pipeline-config');
+      const { createVerifier } = require('./pipeline/contactout-verifier');
+      const cfg = loadConfig();
+      const bouncerKey = (cfg.bouncer && cfg.bouncer.enabled && (cfg.bouncer.keys || [])[0]) || null;
+      const finalEmailIdx = headers.indexOf('finalEmail');
+      const finalEmailCol = finalEmailIdx >= 0 ? sheetsHelper.columnLetter(finalEmailIdx) : null;
+      if (!finalEmailCol) {
+        console.log(`[job:${jobId}] [Verifier] finalEmail column not found — skipping verification.`);
+      } else {
+        verifier = createVerifier({
+          bouncerKey,
+          sheetsClient,
+          sheetId: spec.sheetId,
+          sheetName: activeSheetName,
+          finalEmailCol,
+          bouncerEnabled: !!bouncerKey,
+        });
+        console.log(`[job:${jobId}] [Verifier] Ready. Bouncer ${bouncerKey ? 'enabled' : 'disabled (fallback mode)'} | finalEmail col=${finalEmailCol}`);
+      }
+    } catch (err) {
+      console.error(`[job:${jobId}] [Verifier] Init failed: ${err.message} — continuing without verification.`);
+      verifier = null;
+    }
+  }
+
   allJobStates[jobId].total = rows.length;
   writeJobProgress(spec, 'running', 0, rows.length);
   writeBatchProgress(batchId, allJobStates);
 
   const ROW_LIMIT = 400;
   let processedCount = 0;
+
+  // Row range (1-based sheet rows; row 1 = headers). Sheet row N ↔ rows[N-2].
+  const specRowStart = spec.rowStart ? Math.max(0, spec.rowStart - 2) : 0;
+  const specRowEnd   = spec.rowEnd   ? Math.min(rows.length - 1, spec.rowEnd - 2) : rows.length - 1;
+  if (spec.rowStart || spec.rowEnd) {
+    console.log(`[job:${jobId}] Row range active: sheet rows ${spec.rowStart || 2}..${spec.rowEnd || (rows.length + 1)}`);
+  }
 
   let csvWriter = null;
   if (!SHEET_MODE) {
@@ -246,6 +282,11 @@ async function processJob(page, spec, batchId, allJobStates) {
       break;
     }
 
+    // Skip rows outside the requested range — leave row untouched.
+    if (i < specRowStart || i > specRowEnd) {
+      continue;
+    }
+
     const row = rows[i];
 
     // Skip already-processed rows instantly (sheet mode)
@@ -255,6 +296,19 @@ async function processJob(page, spec, batchId, allJobStates) {
       writeJobProgress(spec, 'running', i + 1, rows.length);
       writeBatchProgress(batchId, allJobStates);
       continue;
+    }
+
+    // Skip rows that already have a finalEmail populated (sheet mode) — pipeline already found an email.
+    if (SHEET_MODE) {
+      const finalEmailKey = Object.keys(row).find(k => /^finalemail$/i.test(k));
+      const finalEmailValue = finalEmailKey ? String(row[finalEmailKey] || '').trim() : '';
+      if (finalEmailValue.includes('@')) {
+        console.log(`[job:${jobId}] [${i + 1}/${rows.length}] Skipping — finalEmail already populated: ${finalEmailValue}`);
+        allJobStates[jobId].progress = i + 1;
+        writeJobProgress(spec, 'running', i + 1, rows.length);
+        writeBatchProgress(batchId, allJobStates);
+        continue;
+      }
     }
 
     const fullName = row[headers[FULL_NAME_COLUMN_INDEX]] || '';
@@ -398,6 +452,16 @@ async function processJob(page, spec, batchId, allJobStates) {
       await sheetsHelper.updateSheetRow(sheetsClient, spec.sheetId, activeSheetName, sheetRowNumber, headers, row);
       await sheetsHelper.markRowProcessed(sheetsClient, spec.sheetId, activeSheetName, sheetRowNumber, processedColLetter);
       console.log(`[job:${jobId}] Row ${i + 1} written to Google Sheet.`);
+
+      // Fire-and-forget Bouncer verification → finalEmail (non-blocking, sequential per worker)
+      if (verifier) {
+        verifier.enqueue(sheetRowNumber, {
+          workEmail:            row['Work Email'] || '',
+          otherWorkEmails:      row['Other Work Emails'] || '',
+          personalEmail:        row['Personal Email'] || '',
+          otherPersonalEmails:  row['Other Personal Emails'] || '',
+        });
+      }
     } else {
       await csvWriter.writeRecords([row]);
     }
@@ -406,6 +470,17 @@ async function processJob(page, spec, batchId, allJobStates) {
     const wait = getDynamicWaitTime();
     console.log(`[job:${jobId}] Waiting ${Math.round(wait / 1000)}s before next row`);
     await page.waitForTimeout(wait);
+  }
+
+  // Drain pending Bouncer verifications before marking the job finished.
+  if (verifier) {
+    const pending = verifier.stats();
+    if (pending.queued > 0 || pending.running) {
+      console.log(`[job:${jobId}] [Verifier] Waiting for ${pending.queued} pending verifications to finish...`);
+    }
+    await verifier.drain();
+    const final = verifier.stats();
+    console.log(`[job:${jobId}] [Verifier] Done. verified=${final.verified} deliverable=${final.deliverable} rejected=${final.rejected} fallback=${final.fallback} blank=${final.blank} errors=${final.errors}`);
   }
 
   if (allJobStates[jobId].status !== 'stopped') {

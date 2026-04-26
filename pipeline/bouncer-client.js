@@ -2,16 +2,16 @@
 
 /**
  * Bouncer email verification client.
- * POST https://api.usebouncer.com/v1/email/verify
+ * GET https://api.usebouncer.com/v1.1/email/verify
  *
  * Returned status values:
- *   "deliverable"   → safe to send
- *   "risky"         → might bounce, but we accept it
- *   "undeliverable" → reject, try next service
- *   "unknown"       → inconclusive, we treat as undeliverable
+ *   "deliverable"   → safe to send (only status we accept)
+ *   "risky"         → might bounce — rejected
+ *   "undeliverable" → rejected, try next service
+ *   "unknown"       → inconclusive, treated as undeliverable
  */
 
-const BOUNCER_BASE = 'https://api.usebouncer.com/v1';
+const BOUNCER_BASE = 'https://api.usebouncer.com/v1.1';
 const TIMEOUT_MS = 15000;
 
 /**
@@ -22,15 +22,18 @@ const TIMEOUT_MS = 15000;
  * @throws {Error} with .statusCode set to HTTP status on API errors
  */
 async function verifyEmail(email, apiKey) {
+  const params = new URLSearchParams({
+    email,
+    timeout: '10',
+  });
+
   let res;
   try {
-    res = await fetch(`${BOUNCER_BASE}/email/verify`, {
-      method: 'POST',
+    res = await fetch(`${BOUNCER_BASE}/email/verify?${params}`, {
+      method: 'GET',
       headers: {
-        'Content-Type': 'application/json',
         'x-api-key': apiKey,
       },
-      body: JSON.stringify({ email }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (err) {
@@ -71,7 +74,7 @@ async function verifyEmail(email, apiKey) {
  */
 function isValid(result) {
   if (!result) return false;
-  return result.status === 'deliverable' || result.status === 'risky';
+  return result.status === 'deliverable';
 }
 
 module.exports = { verifyEmail, isValid };

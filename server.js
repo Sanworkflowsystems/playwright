@@ -14,6 +14,13 @@ if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
 const OUTPUT_DIR = path.join(__dirname, 'outputs');
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR);
 
+function ts() { return new Date().toTimeString().slice(0, 8); }
+const LOG = {
+  info:  (msg, extra) => console.log(`[${ts()}] INFO  ${msg}`, extra || ''),
+  warn:  (msg, extra) => console.warn(`[${ts()}] WARN  ${msg}`, extra || ''),
+  error: (msg, extra) => console.error(`[${ts()}] ERROR ${msg}`, extra || ''),
+};
+
 // ---- Pipeline modules ----
 const { createOrchestrator, resetOrchestrator } = require('./pipeline/orchestrator');
 const { loadConfig, saveConfig }               = require('./pipeline/pipeline-config');
@@ -43,7 +50,7 @@ let sheetsClient = null;
 
 function loadGoogleCredentials() {
   if (!fs.existsSync(CREDENTIALS_PATH)) {
-    console.warn('credentials.json not found — Google Sheets mode will be unavailable.');
+    LOG.warn('credentials.json not found - Google Sheets mode will be unavailable.');
     return;
   }
   try {
@@ -63,15 +70,38 @@ function loadGoogleCredentials() {
       sheetsClient = google.sheets({ version: 'v4', auth: oauth2Client });
     });
   } catch (e) {
-    console.error('Failed to load Google credentials:', e.message);
+    LOG.error(`Failed to load Google credentials: ${e.message}`);
   }
 }
 loadGoogleCredentials();
 
 function extractSheetId(url) {
   const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
-  if (!match) throw new Error('Invalid Google Sheet URL — cannot extract sheet ID');
+  if (!match) throw new Error('Invalid Google Sheet URL - cannot extract sheet ID');
   return match[1];
+}
+
+// Pulls the numeric gid from a Sheets URL (either ?gid= or #gid=). Returns null if absent.
+function extractGid(url) {
+  const m = String(url || '').match(/[?#&]gid=(\d+)/);
+  return m ? m[1] : null;
+}
+
+// Resolve a tab name for a sheet URL: use providedName if set, else try gid, else first sheet.
+// Always safe: errors fall through so the caller's downstream logic can run.
+async function resolveSheetName(sheets, sheetId, sheetUrl, providedName) {
+  if (providedName && providedName.trim()) return providedName.trim();
+  const gid = extractGid(sheetUrl);
+  if (gid) {
+    try {
+      const { getSheetNameByGid } = require('./google-sheets-helper');
+      const name = await getSheetNameByGid(sheets, sheetId, gid);
+      if (name) return name;
+    } catch (e) {
+      LOG.warn(`[resolveSheetName] gid lookup failed for ${sheetId} gid=${gid}: ${e.message}`);
+    }
+  }
+  return null;
 }
 
 const app = express();
@@ -158,17 +188,27 @@ app.get('/auth/status', (req, res) => {
 app.post('/start-sheet-batch', async (req, res) => {
   if (!sheetsClient) return res.status(401).json({ error: 'Not authenticated with Google. Visit /auth/google first.' });
 
-  const { sheetJobs, cookies, manual_login, account } = req.body;
+  const { sheetJobs, cookies, manual_login, account, rowStart: rawRowStart, rowEnd: rawRowEnd } = req.body;
   if (!sheetJobs || sheetJobs.length === 0) return res.status(400).json({ error: 'No sheet jobs provided.' });
+
+  const parseRow = (v) => {
+    const n = parseInt(v, 10);
+    return Number.isFinite(n) && n >= 2 ? n : null;
+  };
+  const rowStart = parseRow(rawRowStart);
+  const rowEnd   = parseRow(rawRowEnd);
 
   const batchId = uuidv4();
   const jobSpecsList = [];
 
   for (let i = 0; i < sheetJobs.length; i++) {
-    const { sheetUrl, sheetName = '' } = sheetJobs[i];
+    const { sheetUrl, sheetName: providedName = '' } = sheetJobs[i];
     let sheetId;
     try { sheetId = extractSheetId(sheetUrl); }
     catch (e) { return res.status(400).json({ error: `Slot ${i + 1}: ${e.message}` }); }
+
+    // Resolve tab name: user-provided → gid lookup → null (worker falls back to first sheet).
+    const sheetName = (await resolveSheetName(sheetsClient, sheetId, sheetUrl, providedName)) || '';
 
     const jobId = uuidv4();
     const statusPath = path.join(__dirname, 'outputs', `${jobId}.json`);
@@ -180,7 +220,9 @@ app.post('/start-sheet-batch', async (req, res) => {
       sheetName,
       sheetUrl,
       statusPath,
-      originalFilename: sheetName
+      originalFilename: sheetName,
+      rowStart: rowStart || null,
+      rowEnd:   rowEnd   || null,
     };
     jobSpecsList.push(spec);
 
@@ -507,9 +549,9 @@ app.post('/start-pipeline', upload.array('files', 1), async (req, res) => {
 
       const { sheetUrl, sheetName: sn } = sheetJobs[0];
       sheetId   = extractSheetId(sheetUrl);
-      sheetName = sn || null;
 
       const { readSheetData, getFirstSheetName } = require('./google-sheets-helper');
+      sheetName = await resolveSheetName(sheetsClient, sheetId, sheetUrl, sn);
       if (!sheetName) sheetName = await getFirstSheetName(sheetsClient, sheetId);
       const data = await readSheetData(sheetsClient, sheetId, sheetName);
       rows    = data.rows;
@@ -530,6 +572,7 @@ app.post('/start-pipeline', upload.array('files', 1), async (req, res) => {
       return res.status(400).json({ error: 'No rows found to process.' });
     }
 
+    LOG.info(`[Pipeline ${pipelineJobId}] Starting pre-enrichment | rows=${rows.length} | mode=${sheetId ? 'Google Sheets' : 'CSV'}${sheetName ? ` | sheet=${sheetName}` : ''}`);
     res.json({ pipelineJobId, totalRows: rows.length });
 
     // ── Run pipeline in background (no await) ──
@@ -537,6 +580,26 @@ app.post('/start-pipeline', upload.array('files', 1), async (req, res) => {
     pipelineJobs[pipelineJobId] = { abortController, status: 'running' };
 
     const orchestrator = getOrInitOrchestrator();
+
+    // Optional: skip individual phases (e.g. resume Hunter+Bouncer after a completed Prospeo run).
+    // Accepts "prospeo" or "hunter" either as an array or a comma-separated string.
+    let skipPhases = [];
+    const rawSkip = req.body?.skipPhases;
+    if (Array.isArray(rawSkip)) skipPhases = rawSkip;
+    else if (typeof rawSkip === 'string' && rawSkip.trim()) skipPhases = rawSkip.split(',').map(s => s.trim()).filter(Boolean);
+    skipPhases = skipPhases.filter(p => p === 'prospeo' || p === 'hunter');
+
+    // Optional row range (1-based sheet row numbers; row 1 = headers, so min = 2).
+    const parseRow = (v) => {
+      const n = parseInt(v, 10);
+      return Number.isFinite(n) && n >= 2 ? n : null;
+    };
+    const rowStart = parseRow(req.body?.rowStart);
+    const rowEnd   = parseRow(req.body?.rowEnd);
+    if (rowStart || rowEnd) {
+      LOG.info(`[Pipeline ${pipelineJobId}] Row range: ${rowStart || 2}..${rowEnd || 'end'}`);
+    }
+
     orchestrator.processRows(rows, {
       pipelineJobId,
       outputDir:   OUTPUT_DIR,
@@ -545,12 +608,15 @@ app.post('/start-pipeline', upload.array('files', 1), async (req, res) => {
       sheetName,
       headers,
       signal: abortController.signal,
+      skipPhases,
+      rowStart,
+      rowEnd,
     }).then(({ stats }) => {
       pipelineJobs[pipelineJobId].status = 'finished';
       pipelineJobs[pipelineJobId].stats  = stats;
-      console.log(`[Pipeline ${pipelineJobId}] Finished`, stats);
+      LOG.info(`[Pipeline ${pipelineJobId}] Finished`, stats);
     }).catch(err => {
-      console.error(`[Pipeline ${pipelineJobId}] Fatal error:`, err.message);
+      LOG.error(`[Pipeline ${pipelineJobId}] Fatal error: ${err.message}`);
       pipelineJobs[pipelineJobId].status = 'error';
       fs.writeFileSync(progressPath, JSON.stringify({
         status: 'error', error: err.message, updatedAt: new Date().toISOString()
@@ -558,7 +624,7 @@ app.post('/start-pipeline', upload.array('files', 1), async (req, res) => {
     });
 
   } catch (err) {
-    console.error('[/start-pipeline]', err.message);
+    LOG.error(`[/start-pipeline] ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -650,6 +716,109 @@ app.get('/pipeline-config', (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════════════════════
+// ANYMAILFINDER ENDPOINTS
+// ════════════════════════════════════════════════════════════════════════════
+
+const amfJobs = {};  // amfJobId → status/progress file path + abort flag
+
+/**
+ * POST /start-anymailfinder
+ * Body: { sheetUrl, sheetName, apiKey, rowStart, rowEnd }
+ */
+app.post('/start-anymailfinder', async (req, res) => {
+  if (!sheetsClient) return res.status(401).json({ error: 'Not authenticated with Google. Visit /auth/google first.' });
+
+  const { sheetUrl, sheetName: providedName, apiKey, rowStart: rawRowStart, rowEnd: rawRowEnd } = req.body;
+  if (!sheetUrl)  return res.status(400).json({ error: 'sheetUrl is required.' });
+  if (!apiKey)    return res.status(400).json({ error: 'apiKey is required.' });
+
+  let sheetId;
+  try { sheetId = extractSheetId(sheetUrl); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+
+  const parseRow = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= 2 ? n : null; };
+  const rowStart = parseRow(rawRowStart);
+  const rowEnd   = parseRow(rawRowEnd);
+
+  const amfJobId   = uuidv4();
+  const statusPath = path.join(OUTPUT_DIR, `${amfJobId}-amf.json`);
+
+  const initialStatus = { status: 'starting', processed: 0, total: 0, found: 0, notFound: 0, credits: 0, stoppedAtRow: null, updatedAt: new Date().toISOString() };
+  fs.writeFileSync(statusPath, JSON.stringify(initialStatus));
+  amfJobs[amfJobId] = { statusPath, aborted: false };
+
+  res.json({ amfJobId });
+
+  // Run in background
+  (async () => {
+    try {
+      const { readSheetData, getFirstSheetName } = require('./google-sheets-helper');
+      const sheetName = (await resolveSheetName(sheetsClient, sheetId, sheetUrl, providedName)) || await getFirstSheetName(sheetsClient, sheetId);
+      const { rows, headers } = await readSheetData(sheetsClient, sheetId, sheetName);
+
+      LOG.info(`[AnyMailFinder ${amfJobId}] Starting | rows=${rows.length} | sheet=${sheetName}${rowStart ? ` | range=${rowStart}..${rowEnd || 'end'}` : ''}`);
+
+      const writeStatus = (patch) => {
+        try {
+          const current = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+          fs.writeFileSync(statusPath, JSON.stringify({ ...current, ...patch, updatedAt: new Date().toISOString() }));
+        } catch (_) {}
+      };
+
+      writeStatus({ status: 'running' });
+
+      const { runAnyMailFinder } = require('./pipeline/anymailfinder-client');
+      const abortController = new AbortController();
+      amfJobs[amfJobId].abort = () => abortController.abort();
+
+      const stats = await runAnyMailFinder({
+        sheetsClient,
+        sheetId,
+        sheetName,
+        rows,
+        headers,
+        apiKey,
+        rowStart,
+        rowEnd,
+        signal: abortController.signal,
+        onProgress: ({ processed, total, row, email, status, stoppedAtRow }) => {
+          if (amfJobs[amfJobId].aborted) abortController.abort();
+          writeStatus({ processed, total, stoppedAtRow: stoppedAtRow || null });
+        },
+      });
+
+      const finalStatus = stats.stoppedAtRow ? 'credits_exhausted' : 'finished';
+      writeStatus({ status: finalStatus, ...stats });
+      LOG.info(`[AnyMailFinder ${amfJobId}] ${finalStatus} | found=${stats.found} credits=${stats.credits}${stats.stoppedAtRow ? ` stoppedAtRow=${stats.stoppedAtRow}` : ''}`);
+    } catch (err) {
+      LOG.error(`[AnyMailFinder ${amfJobId}] Fatal: ${err.message}`);
+      try {
+        const current = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+        fs.writeFileSync(statusPath, JSON.stringify({ ...current, status: 'error', error: err.message, updatedAt: new Date().toISOString() }));
+      } catch (_) {}
+    }
+  })();
+});
+
+app.get('/anymailfinder-status/:id', (req, res) => {
+  const job = amfJobs[req.params.id];
+  if (!job) return res.status(404).json({ error: 'AnyMailFinder job not found.' });
+  try {
+    res.json(JSON.parse(fs.readFileSync(job.statusPath, 'utf8')));
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to read status.' });
+  }
+});
+
+app.post('/stop-anymailfinder/:id', (req, res) => {
+  const job = amfJobs[req.params.id];
+  if (!job) return res.status(404).json({ error: 'Not found.' });
+  job.aborted = true;
+  if (job.abort) job.abort();
+  res.json({ ok: true });
+});
+
 // ---- Single-job queue runner ----
 
 async function runQueue() {
@@ -686,13 +855,14 @@ function runWorker(job) {
       JOB_MANUAL: job.details.manual_login ? '1' : '0',
       JOB_ACCOUNT: job.details.account || 'none'
     });
+    LOG.info(`[ContactOut ${job.id}] Launching single worker`);
     const child = spawn('node', ['worker.js', ...args], { stdio: 'inherit', env });
     job.process = child;
 
     child.on('exit', (code, signal) => {
       job.process = null;
       if (signal === 'SIGTERM') {
-        console.log(`Job ${job.id} was stopped intentionally.`);
+        LOG.warn(`[ContactOut ${job.id}] Worker stopped intentionally`);
         job.status = 'stopped';
         try {
           const statusPayload = { ...JSON.parse(fs.readFileSync(job.statusPath, 'utf8')), status: 'stopped' };
@@ -702,8 +872,10 @@ function runWorker(job) {
         }
         resolve();
       } else if (code === 0) {
+        LOG.info(`[ContactOut ${job.id}] Worker exited successfully`);
         resolve();
       } else {
+        LOG.error(`[ContactOut ${job.id}] Worker exited with code ${code}`);
         reject(new Error('Worker exited with code ' + code));
       }
     });
@@ -748,18 +920,21 @@ function runBatchWorker(batch) {
       GOOGLE_TOKENS: isSheetMode && fs.existsSync(TOKENS_PATH) ? fs.readFileSync(TOKENS_PATH, 'utf8') : '',
       GOOGLE_CREDENTIALS: isSheetMode && fs.existsSync(CREDENTIALS_PATH) ? fs.readFileSync(CREDENTIALS_PATH, 'utf8') : '',
     });
+    LOG.info(`[ContactOut batch ${batch.batchId}] Launching batch worker | jobs=${batch.jobSpecs.length} | mode=${isSheetMode ? 'Google Sheets' : 'CSV'}`);
     const child = spawn('node', ['parallel-worker.js', batch.batchId], { stdio: 'inherit', env });
     batch.process = child;
 
     child.on('exit', (code, signal) => {
       batch.process = null;
       if (signal === 'SIGTERM') {
-        console.log(`Batch ${batch.batchId} was stopped intentionally.`);
+        LOG.warn(`[ContactOut batch ${batch.batchId}] Batch worker stopped intentionally`);
         batch.status = 'stopped';
         resolve();
       } else if (code === 0) {
+        LOG.info(`[ContactOut batch ${batch.batchId}] Batch worker exited successfully`);
         resolve();
       } else {
+        LOG.error(`[ContactOut batch ${batch.batchId}] Batch worker exited with code ${code}`);
         reject(new Error('Batch worker exited with code ' + code));
       }
     });
@@ -767,4 +942,4 @@ function runBatchWorker(batch) {
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server listening ${PORT}`));
+app.listen(PORT, () => LOG.info(`Server listening ${PORT}`));
